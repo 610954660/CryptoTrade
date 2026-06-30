@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>缓存管理 · BOLL 筛选器</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="stylesheet" href="/css/cache.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">🗄️</span>
+      <span class="title">缓存管理</span>
+      <a href="/" class="back-link">← 返回筛选器</a>
+      <button id="btn-open-settings" class="header-nav" title="代理 / 缓存设置">⚙️ 设置</button>
+    </div>
+    <div class="header-actions">
+      <span id="health-pill" class="pill">检测中…</span>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <!-- 概览 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>概览</h2>
+        <button id="btn-refresh-stats" class="btn ghost small">🔄 刷新</button>
+      </div>
+      <div id="stats-summary" class="stats-grid">
+        <div class="stat-cell"><div class="stat-label">数据库</div><div class="stat-value" id="stat-db-size">-</div></div>
+        <div class="stat-cell"><div class="stat-label">标的总数</div><div class="stat-value" id="stat-symbols">-</div></div>
+        <div class="stat-cell"><div class="stat-label">K 线总数</div><div class="stat-value" id="stat-klines">-</div></div>
+        <div class="stat-cell"><div class="stat-label">市场数</div><div class="stat-value" id="stat-markets">-</div></div>
+      </div>
+      <div id="stats-by-market" class="muted small" style="margin-top:8px"></div>
+    </section>
+
+    <!-- 操作 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>标的列表</h2>
+        <div class="filter-box">
+          <input id="search-input" type="search" placeholder="搜索代码/名称…" />
+        </div>
+      </div>
+      <div class="seg seg-3" id="market-tabs">
+        <button class="seg-btn active" data-market="">全部</button>
+        <button class="seg-btn" data-market="a_share">🇨🇳 A 股</button>
+        <button class="seg-btn" data-market="crypto">🪙 Binance</button>
+        <button class="seg-btn" data-market="crypto_okx">🟠 OKX</button>
+      </div>
+
+      <div class="actions" style="margin-top:8px">
+        <button id="btn-select-all" class="btn ghost small">全选</button>
+        <button id="btn-select-none" class="btn ghost small">取消全选</button>
+        <button id="btn-delete-selected" class="btn danger small" disabled>🗑️ 删除选中 (<span id="sel-count">0</span>)</button>
+        <button id="btn-refresh-selected" class="btn ghost small" disabled>🔄 刷新选中</button>
+        <button id="btn-clear-all" class="btn danger">⚠️ 一键清空全部</button>
+      </div>
+
+      <div class="table-wrap" style="margin-top:12px">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th style="width:36px"><input type="checkbox" id="check-all" /></th>
+              <th>市场</th>
+              <th>代码</th>
+              <th>名称</th>
+              <th>K 线数</th>
+              <th>周期数</th>
+              <th>最新 K 线</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr class="empty"><td colspan="8">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 分页控件 (底部) -->
+      <div class="pager" id="pager">
+        <div class="pager-info">
+          <span id="pager-range">0-0</span> / <span id="pager-total">0</span> 条
+        </div>
+        <div class="pager-nav">
+          <button id="pager-first" class="btn ghost small" title="首页">«</button>
+          <button id="pager-prev"  class="btn ghost small" title="上一页">‹</button>
+          <span class="pager-pages">
+            <span id="pager-current">1</span> / <span id="pager-count">1</span>
+          </span>
+          <button id="pager-next"  class="btn ghost small" title="下一页">›</button>
+          <button id="pager-last"  class="btn ghost small" title="末页">»</button>
+        </div>
+        <div class="pager-size">
+          每页
+          <select id="pager-size-sel">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+          条
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 标的详情弹窗 -->
+  <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="detail-title">—</h3>
+          <div id="detail-sub" class="muted small">—</div>
+        </div>
+        <button id="detail-close" class="icon-btn">✕</button>
+      </div>
+      <div id="detail-content" style="padding:14px; max-height:60vh; overflow:auto"></div>
+    </div>
+  </div>
+
+  <!-- Confirm 弹窗 -->
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card" style="max-width:420px">
+      <div class="modal-head"><h3 id="confirm-title">确认</h3></div>
+      <div style="padding:14px"><p id="confirm-text" style="margin:0"></p></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 14px;border-top:1px solid var(--border)">
+        <button id="confirm-cancel" class="btn ghost">取消</button>
+        <button id="confirm-ok" class="btn danger">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/cache.js"></script>
+  <script type="module" src="/js/settings.js"></script>
+  <script type="module">
+    import { openSettings } from '/js/settings.js';
+    document.getElementById('btn-open-settings').addEventListener('click', () => openSettings());
+  </script>
+</body>
+</html>

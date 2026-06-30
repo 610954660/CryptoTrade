@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# SQLite cache (运行时数据, 不入版本)
+.cache/
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

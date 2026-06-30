@@ -1,0 +1,10 @@
+{
+  "proxy": {
+    "enabled": true,
+    "url": "http://127.0.0.1:7897",
+    "scope": "crypto_only"
+  },
+  "runtime": {
+    "no_cache": false
+  }
+}

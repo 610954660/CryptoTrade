@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
+  />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="筛选器" />
+  <title>BOLL 筛选器 · A 股 / Crypto</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+  <link rel="apple-touch-icon" href="/icons/icon.svg" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <!-- lightweight-charts 用于 K 线预览 -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">📈</span>
+      <span class="title">BOLL 筛选器</span>
+      <a href="/cache.html" target="_blank" rel="noopener" class="header-nav" title="在新标签页打开缓存管理">🗄️ 缓存管理</a>
+      <button id="btn-open-settings" class="header-nav" title="代理 / 缓存设置">⚙️ 设置</button>
+    </div>
+    <div class="header-actions">
+      <span id="health-pill" class="pill" title="后端连接状态">检测中…</span>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <!-- ====== 市场切换 ====== -->
+    <section class="card market-pick">
+      <div class="seg">
+        <button class="seg-btn" data-market="crypto" data-provider="binance">🪙 Binance 永续</button>
+        <button class="seg-btn active" data-market="crypto_okx" data-provider="okx">🟠 OKX 永续</button>
+        <button class="seg-btn" data-market="a_share">🇨🇳 A 股</button>
+      </div>
+      <div id="provider-status" class="muted small" style="margin-top:6px">正在探测数据源…</div>
+      <div id="cache-status" class="muted small" style="margin-top:4px">缓存: 检测中…</div>
+    </section>
+
+    <!-- ====== 筛选规则 ====== -->
+    <section class="card">
+      <div class="card-head">
+        <h2>筛选规则</h2>
+        <button id="btn-add-rule" class="btn ghost small">+ 添加规则</button>
+      </div>
+      <p class="muted small">
+        添加多条规则 = 多周期联合筛选 (默认 AND)。例如: 同时要求
+        <code>15m</code> + <code>30m</code> + <code>1h</code> + <code>4h</code> 都满足"向上穿越中轨"。
+      </p>
+      <div id="rule-list" class="rule-list"></div>
+    </section>
+
+    <!-- ====== 操作区 ====== -->
+    <section class="card">
+      <div class="actions">
+        <button id="btn-scan" class="btn primary big">🔍 扫描全市场</button>
+        <button id="btn-scan-sample" class="btn ghost">仅扫描前 50 个</button>
+        <button id="btn-scan-hs300" class="btn ghost" data-market="a_share">⭐ 沪深 300</button>
+        <button id="btn-save" class="btn ghost" title="把当前规则保存到本地">💾 保存</button>
+        <button id="btn-load" class="btn ghost" title="从本地加载规则">📂 加载</button>
+      </div>
+      <div id="progress" class="progress hidden">
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <div id="progress-text" class="muted small">准备中…</div>
+        <div id="progress-hits" class="muted small" style="margin-top:4px"></div>
+      </div>
+    </section>
+
+    <!-- ====== 结果 ====== -->
+    <section class="card">
+      <div class="card-head">
+        <h2>命中结果 <span id="hit-count" class="badge">0</span></h2>
+        <div class="filter-box">
+          <input id="filter-input" type="search" placeholder="过滤代码/名称…" />
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="result-table" class="result-table">
+          <thead>
+            <tr>
+              <th>代码</th>
+              <th>名称</th>
+              <th>命中规则</th>
+              <th>最近价</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="result-tbody">
+            <tr class="empty"><td colspan="5">暂无结果, 配置规则后点击"扫描"</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- ====== K 线预览弹窗 ====== -->
+  <div id="chart-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="chart-title">—</h3>
+          <div id="chart-sub" class="muted small">—</div>
+        </div>
+        <button id="chart-close" class="icon-btn" aria-label="关闭">✕</button>
+      </div>
+      <div class="chart-intervals" id="chart-intervals"></div>
+      <div id="chart-container" class="chart-container"></div>
+      <div id="chart-boll-info" class="boll-info muted small"></div>
+    </div>
+  </div>
+
+  <!-- ====== 底部信息条 ====== -->
+  <footer class="app-footer">
+    <span>本地时间 <span id="now-time">--:--:--</span></span>
+    <span class="dot">·</span>
+    <span id="last-scan-info">未扫描</span>
+  </footer>
+
+  <script type="module" src="/js/app.js"></script>
+  <script type="module" src="/js/settings.js"></script>
+</body>
+</html>

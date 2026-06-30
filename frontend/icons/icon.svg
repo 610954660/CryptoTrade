@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0b1220"/>
+  <g stroke="none" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- candlesticks -->
+    <g>
+      <line x1="100" y1="120" x2="100" y2="240" stroke="#5a6478" stroke-width="6"/>
+      <rect x="80" y="150" width="40" height="60" fill="#22c55e"/>
+      <line x1="180" y1="180" x2="180" y2="320" stroke="#5a6478" stroke-width="6"/>
+      <rect x="160" y="220" width="40" height="60" fill="#ef4444"/>
+      <line x1="260" y1="200" x2="260" y2="360" stroke="#5a6478" stroke-width="6"/>
+      <rect x="240" y="220" width="40" height="80" fill="#22c55e"/>
+      <line x1="340" y1="260" x2="340" y2="420" stroke="#5a6478" stroke-width="6"/>
+      <rect x="320" y="290" width="40" height="100" fill="#22c55e"/>
+      <line x1="420" y1="220" x2="420" y2="400" stroke="#5a6478" stroke-width="6"/>
+      <rect x="400" y="240" width="40" height="140" fill="#22c55e"/>
+    </g>
+    <!-- BOLL band -->
+    <path d="M 80 350 C 200 320, 300 280, 440 250" stroke="#f59e0b" stroke-width="6" fill="none"/>
+    <path d="M 80 380 C 200 360, 300 320, 440 290" stroke="#f59e0b" stroke-width="4" stroke-dasharray="10 6" fill="none" opacity="0.7"/>
+  </g>
+</svg>
