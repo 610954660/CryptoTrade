@@ -116,26 +116,118 @@ code { background: var(--bg-2); padding: 1px 6px; border-radius: 4px; font-size:
 /* ----------- Rules ----------- */
 .rule-list { display: flex; flex-direction: column; gap: 8px; }
 .rule {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   background: var(--card-2); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 8px 10px;
 }
 .rule .ix { color: var(--muted); font-weight: 600; min-width: 24px; }
-.rule select {
+.rule select, .rule input[type="number"] {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 8px; font-size: 13px; flex: 1; min-width: 0;
+  border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 0;
 }
-.rule select.interval { max-width: 110px; flex: 0 0 110px; }
-.rule select.pattern { flex: 1 1 160px; }
+.rule select.iv-interval   { flex: 0 0 78px; }
+.rule select.iv-indicator  { flex: 0 0 120px; }
+.rule select.iv-pattern    { flex: 1 1 140px; }
+.rule input.iv-lookback    { flex: 0 0 80px; }
+.rule input.iv-match       { flex: 0 0 70px; }
+.rule input.iv-value       { flex: 0 0 90px; }
+.rule input.iv-value.hidden { display: none; }
+.rule .rh { font-size: 11px; color: var(--muted); padding: 0 2px; }
+.rule-head {
+  background: transparent; border: none; padding: 0 10px;
+}
+.rule-head .rh { flex: 1 1 auto; }
+.rule-head .rh-act { flex: 0 0 24px; }
+.rule-head .rh-value { flex: 0 0 90px; }
+.rule-head .rh-value.hidden { display: none; }
 .rule .remove {
   background: transparent; border: none; color: var(--muted); cursor: pointer;
-  padding: 4px 8px; font-size: 16px;
+  padding: 4px 8px; font-size: 16px; flex: 0 0 24px;
 }
 .rule .remove:hover { color: var(--red); }
 .rule-empty {
   text-align: center; color: var(--muted); padding: 12px; font-size: 13px;
   border: 1px dashed var(--border); border-radius: var(--radius-sm);
 }
+
+/* ----------- 配置页签栏 ----------- */
+.config-tabs {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--card-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 4px;
+  margin-bottom: 12px; overflow-x: auto;
+}
+.cfg-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: none; background: transparent; color: var(--muted);
+  padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  white-space: nowrap; flex: 0 0 auto;
+  border-bottom: 2px solid transparent;
+}
+.cfg-tab:hover { color: var(--text); }
+.cfg-tab.active {
+  color: var(--primary);
+  background: rgba(59, 130, 246, 0.1);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+.cfg-tab .cfg-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.cfg-tab .cfg-dirty {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--amber);
+}
+.cfg-tab-add {
+  border: none; background: transparent; color: var(--muted);
+  font-size: 20px; cursor: pointer; padding: 4px 10px;
+  border-radius: 6px; line-height: 1; flex: 0 0 auto;
+}
+.cfg-tab-add:hover { color: var(--primary); background: var(--card); }
+.cfg-tab .cfg-name { cursor: text; border-bottom: 1px dashed transparent; }
+.cfg-tab .cfg-name:hover {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+.cfg-rename-input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--primary);
+  border-radius: 4px; padding: 2px 6px; font-size: 13px; font-weight: 600;
+  width: 110px; max-width: 100%;
+}
+
+/* ----------- 配置操作按钮 (save / delete) ----------- */
+.config-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn-config {
+  border: 1px solid var(--border); background: var(--card-2); color: var(--text);
+  padding: 6px 12px; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-config:hover:not(:disabled) { border-color: var(--primary); }
+.btn-cfg-save {
+  background: var(--primary); border-color: var(--primary); color: white;
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+.btn-cfg-save:hover { background: var(--primary-2); }
+.btn-cfg-del { color: var(--muted); }
+.btn-cfg-del:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+.btn-cfg-del:disabled { opacity: 0.35; cursor: not-allowed; }
+@keyframes pulse-soft {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+  50%      { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+}
+
+/* ----------- 底部长条"添加规则"按钮 ----------- */
+.add-rule-btn {
+  width: 100%; margin-top: 10px;
+  background: transparent; color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px; font-size: 13px; cursor: pointer;
+  transition: all 0.15s;
+}
+.add-rule-btn:hover {
+  color: var(--primary); border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.05);
+}
+.add-rule-btn:active { transform: scale(0.99); }
 
 /* ----------- Actions / Progress ----------- */
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }

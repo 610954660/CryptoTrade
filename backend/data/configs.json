@@ -1,0 +1,59 @@
+{
+  "configs": [
+    {
+      "id": "418095577026",
+      "name": "默认配置",
+      "rules": [
+        {
+          "interval": "1d",
+          "indicator": "ma",
+          "pattern": "ma5_above_ma20",
+          "value": null,
+          "lookback": 30,
+          "match_count": 4
+        },
+        {
+          "interval": "1d",
+          "indicator": "vol",
+          "pattern": "vol_above",
+          "value": 1.4,
+          "lookback": 30,
+          "match_count": 1
+        }
+      ],
+      "created_at": 1782835442.2318356,
+      "updated_at": 1782842407.9226508,
+      "market": "a_share"
+    },
+    {
+      "id": "504df2cd2d95",
+      "name": "默认配置",
+      "market": "crypto",
+      "rules": [
+        {
+          "interval": "15m",
+          "indicator": "boll",
+          "pattern": "cross_mid_up",
+          "value": null,
+          "lookback": 30,
+          "match_count": 1
+        },
+        {
+          "interval": "1h",
+          "indicator": "boll",
+          "pattern": "cross_mid_up",
+          "value": null,
+          "lookback": 30,
+          "match_count": 1
+        }
+      ],
+      "created_at": 1782839889.450253,
+      "updated_at": 1782842246.8362174
+    }
+  ],
+  "selected_id": "418095577026",
+  "selected_by_market": {
+    "a_share": "418095577026",
+    "crypto": "504df2cd2d95"
+  }
+}

@@ -43,17 +43,24 @@
       <div id="cache-status" class="muted small" style="margin-top:4px">缓存: 检测中…</div>
     </section>
 
-    <!-- ====== 筛选规则 ====== -->
+    <!-- ====== 筛选规则 (配置 + 规则) ====== -->
     <section class="card">
       <div class="card-head">
         <h2>筛选规则</h2>
-        <button id="btn-add-rule" class="btn ghost small">+ 添加规则</button>
       </div>
-      <p class="muted small">
-        添加多条规则 = 多周期联合筛选 (默认 AND)。例如: 同时要求
-        <code>15m</code> + <code>30m</code> + <code>1h</code> + <code>4h</code> 都满足"向上穿越中轨"。
+      <p class="muted small" style="margin-top:0">
+        每个页签是一个独立配置 (一组规则)。 切换页签 = 换一套筛选策略; 扫描按当前选中的配置执行。
+        <br>添加多条规则 = 多周期联合筛选 (默认 AND)。例如: 同时要求
+        <code>15m</code> + <code>1h</code> + <code>4h</code> 都满足"向上穿越中轨"。
       </p>
+      <!-- 配置页签栏 -->
+      <div class="config-tabs" id="config-tabs"></div>
+      <!-- 当前配置的规则列表 -->
       <div id="rule-list" class="rule-list"></div>
+      <!-- 底部长条"添加规则"按钮 -->
+      <button class="add-rule-btn" id="add-rule-btn">+ 添加规则 (向当前配置加一条)</button>
+      <!-- 隐藏的 actions 容器 (save/del 按钮由 JS 注入) -->
+      <div class="config-actions" id="config-actions" style="margin-top:8px"></div>
     </section>
 
     <!-- ====== 操作区 ====== -->
@@ -62,8 +69,6 @@
         <button id="btn-scan" class="btn primary big">🔍 扫描全市场</button>
         <button id="btn-scan-sample" class="btn ghost">仅扫描前 50 个</button>
         <button id="btn-scan-hs300" class="btn ghost" data-market="a_share">⭐ 沪深 300</button>
-        <button id="btn-save" class="btn ghost" title="把当前规则保存到本地">💾 保存</button>
-        <button id="btn-load" class="btn ghost" title="从本地加载规则">📂 加载</button>
       </div>
       <div id="progress" class="progress hidden">
         <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>

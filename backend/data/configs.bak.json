@@ -1,0 +1,29 @@
+{
+  "configs": [
+    {
+      "id": "418095577026",
+      "name": "默认配置",
+      "rules": [
+        {
+          "interval": "1d",
+          "indicator": "ma",
+          "pattern": "ma5_above_ma20",
+          "value": null,
+          "lookback": 20,
+          "match_count": 10
+        },
+        {
+          "interval": "1d",
+          "indicator": "kdj",
+          "pattern": "j_below_0",
+          "value": null,
+          "lookback": 20,
+          "match_count": 10
+        }
+      ],
+      "created_at": 1782835442.2318356,
+      "updated_at": 1782838565.8752594
+    }
+  ],
+  "selected_id": "418095577026"
+}

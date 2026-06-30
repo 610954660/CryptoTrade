@@ -1,6 +1,6 @@
 // 应用主入口 - 串起所有 UI 与状态
 import { api } from './api.js';
-import { FilterManager, INTERVALS } from './filters.js';
+import { ConfigManager } from './config-manager.js';
 import { KLineChart } from './chart.js';
 import { openSettings } from './settings.js';
 
@@ -102,25 +102,31 @@ async function refreshCacheStatus() {
   }
 }
 
-// ----- 拉取形态定义 -----
+// ----- 拉取形态定义 (旧版, 现在由 ConfigManager 内部处理) -----
+// 保留为空函数, 兼容早期 init 调用
 async function loadPatterns() {
-  try {
-    const data = await api.patterns();
-    if (data && data.patterns) {
-      filterMgr.setPatterns(data.patterns);
-    }
-  } catch (e) {
-    console.warn('拉取形态失败, 用默认:', e);
-  }
+  // no-op: ConfigManager 直接从 /api/indicators 拉
 }
 
 // ----- 扫描 (SSE 流式) -----
 async function runScan(scope = 'all') {
   if (state.scanning) return;
-  const rules = filterMgr.getRules();
-  if (!rules.length) {
-    alert('请先添加至少一条规则');
+  const allRules = cfgMgr.getSelectedRules();
+  if (!allRules.length) {
+    alert('当前配置没有规则, 请先在下方添加。');
     return;
+  }
+  // 过滤掉未填完整的 (空 interval/pattern/indicator)
+  const validRules = allRules.filter((r) => r.interval && r.indicator && r.pattern);
+  if (!validRules.length) {
+    alert('当前配置的规则都没填完整 (周期/指标/形态)。\n请在下拉框里选择具体的值。');
+    return;
+  }
+  // 提示有未保存修改 (但不阻塞扫描 - 用内存中的最新规则跑)
+  if (cfgMgr.isDirty()) {
+    if (!confirm('当前配置有未保存的修改。\n\n点「确定」使用当前未保存的规则扫描\n点「取消」先保存')) {
+      return;
+    }
   }
   state.scanning = true;
   state.scope = scope;
@@ -142,7 +148,7 @@ async function runScan(scope = 'all') {
   // 先决定 symbol 列表
   let body = {
     market: state.market,
-    rules,
+    rules: validRules,  // 过滤掉未填完整的
     combine: 'all',
     limit: 100,
     concurrency: 8,
@@ -207,6 +213,8 @@ async function runScan(scope = 'all') {
         } else if (rawEvent === 'done') {
           setProgress(100, `完成 · 命中 ${data.hit_count} · 用时 ${data.elapsed_sec}s · 错误 ${data.errors}`, 0);
           setLastScanInfo(`上次扫描 ${timeNow()} · ${state.market} · 命中 ${data.hit_count}`);
+          // 扫描完成: 缓存有新行, 刷新一次缓存状态 (不再定时)
+          refreshCacheStatus();
         } else if (rawEvent === 'error') {
           alert('扫描出错: ' + data.message);
         }
@@ -300,7 +308,9 @@ function renderResults() {
       const symbol = tr.dataset.symbol;
       const hit = state.hits.find((h) => h.symbol === symbol);
       const display = `${hit.name || ''} (${hit.symbol})`;
-      const defaultIv = Object.keys(hit.rules || {})[0] || '1d';
+      // 从规则对象里取 interval (不再用 key, key 已经是 "ri|iv|ind|pat" 复合形式)
+      const firstRule = Object.values(hit.rules || {})[0];
+      const defaultIv = (firstRule && firstRule.interval) || '1d';
       chart.show(state.market, symbol, display, defaultIv, state.provider);
     });
   });
@@ -316,35 +326,28 @@ function bindMarketSwitch() {
       state.provider = b.dataset.provider || 'binance';
       state.hits = [];
       renderResults();
+      // 通知 ConfigManager 按市场重拉指标 + 配置
+      if (cfgMgr) cfgMgr.setMarket(state.market);
     });
   });
 }
 
-// ----- 规则持久化 -----
-function saveRules() {
-  const rules = filterMgr.getRules();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(rules));
-  alert('已保存到本地');
-}
-function loadRules() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const rules = JSON.parse(raw);
-    if (Array.isArray(rules) && rules.length) {
-      filterMgr.setRules(rules);
-    }
-  } catch (e) {
-    console.warn('加载规则失败:', e);
-  }
-}
-
 // ----- 启动 -----
-let filterMgr, chart;
+let cfgMgr, chart;
 
-function init() {
-  filterMgr = new FilterManager($('#rule-list'));
-  filterMgr.onChange = () => {};
+async function init() {
+  // 配置 + 规则管理 (多配置 + 持久化在后端)
+  cfgMgr = new ConfigManager({
+    tabsEl: $('#config-tabs'),
+    actionsEl: $('#config-actions'),
+    listEl: $('#rule-list'),
+    addRuleEl: $('#add-rule-btn'),
+    onRulesChange: (rules) => {
+      // 规则变化时可在这里做实时提示, 当前不需要
+    },
+  });
+  cfgMgr.setMarket(state.market);  // 先设 market, 再 load (load 内部也会 refresh)
+  await cfgMgr.load();
 
   chart = new KLineChart({
     modal: $('#chart-modal'),
@@ -358,12 +361,9 @@ function init() {
   });
 
   bindMarketSwitch();
-  $('#btn-add-rule').addEventListener('click', () => filterMgr.add());
   $('#btn-scan').addEventListener('click', () => runScan('all'));
   $('#btn-scan-sample').addEventListener('click', () => runScan('sample'));
   $('#btn-scan-hs300').addEventListener('click', () => runScan('hs300'));
-  $('#btn-save').addEventListener('click', saveRules);
-  $('#btn-load').addEventListener('click', loadRules);
   $('#filter-input').addEventListener('input', renderResults);
   $('#btn-open-settings').addEventListener('click', () => {
     openSettings({
@@ -374,25 +374,15 @@ function init() {
       },
     });
   });
-
-  // 默认 1 条规则, 方便用户直接使用
-  filterMgr.add({ interval: '15m', pattern: 'cross_mid_up' });
-  filterMgr.add({ interval: '1h',  pattern: 'cross_mid_up' });
-  filterMgr.add({ interval: '4h',  pattern: 'cross_mid_up' });
-
-  // 启动时尝试加载本地规则
-  loadRules();
-
   // 后端健康
   checkHealth();
   setInterval(checkHealth, 15000);
 
   // 数据源探测: 仅在首连成功时探测一次, 不再定时轮询
-  checkHealth().then((h) => { if (h) refreshProviderStatusOnce(); });
+  checkHealth().then((h) => { if (h) { refreshProviderStatusOnce(); refreshCacheStatus(); } });
 
-  // 缓存状态
-  refreshCacheStatus();
-  setInterval(refreshCacheStatus, 30000);
+  // 缓存状态: 不再定时刷新, 仅在 (a) 首连成功 (b) 扫描完成 时拉一次。
+  // scan/done 事件里调用 _cacheStatusAfterScan() 即可。
 
   // 时间
   setInterval(() => { $('#now-time').textContent = timeNow(); }, 1000);

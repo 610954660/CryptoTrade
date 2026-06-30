@@ -3,12 +3,13 @@ FastAPI 主入口
 ==============
 提供:
   GET  /api/health                    健康检查
+  GET  /api/indicators                指标+形态+支持周期元数据
   GET  /api/a-stocks/list             A 股列表
   GET  /api/a-stocks/kline            单只 A 股 K 线
   GET  /api/crypto/list               Binance 永续合约列表
   GET  /api/crypto/kline              单只币 K 线
   POST /api/scan                      扫描 (按规则)
-  GET  /api/patterns                  列出所有支持的形态
+  GET  /api/patterns                  列出所有支持的形态 (旧 BOLL 兼容)
 
 静态资源 (frontend/) 由根路由直接提供, PWA 一体化。
 """
@@ -16,33 +17,95 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import traceback
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+# --------- 启动期错误捕获 (终端闪退时能留底) ---------
+# 任何 import / 初始化阶段的异常都写到 data/logs/{date}/startup-error.log
+# 这样即使 .bat 启动后窗口秒关, 也能从文件读完整堆栈。
+_BACKEND_ROOT = Path(__file__).resolve().parent
+_LOG_DIR = _BACKEND_ROOT / "data" / "logs" / datetime.now().strftime("%Y-%m-%d")
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_STARTUP_LOG = _LOG_DIR / "startup-error.log"
+import time as _start_t
+_log_age_h = ((_start_t.time() - _STARTUP_LOG.stat().st_mtime) / 3600) if _STARTUP_LOG.exists() else 0
 
-from data_sources import a_share, crypto
-from indicators import compute_boll, boll_to_dicts
-from scanner.matcher import PATTERN_LABELS
-from scanner.service import (
-    IntervalRule,
-    ScanRequest,
-    scan,
-)
-from cache import db as cache_db
-from cache import service as cache_service
-from cache import repository as cache_repository
-import settings as app_settings
 
+def _log_startup_error(tag: str, exc: BaseException):
+    """把启动期异常写进日志文件 (含完整 traceback)。"""
+    try:
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n[{datetime.now().isoformat(timespec='seconds')}] {tag}\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write("\n")
+    except Exception:
+        pass  # 写日志失败别再炸
+
+
+def _truncate_stale_log():
+    """启动时清掉 >24h 前的旧日志, 避免误导 (上次修复前的 crash 仍躺在文件里)。"""
+    try:
+        if _STARTUP_LOG.exists():
+            import time as _t
+            age_h = (_t.time() - _STARTUP_LOG.stat().st_mtime) / 3600
+            if age_h > 24:
+                _STARTUP_LOG.unlink()
+                return
+        # 写一行"启动 OK"标记, 后面新 crash 才能跟这个对照
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] STARTUP OK (上一条 = 距今 {age_h:.1f}h 内或刚截断)\n")
+    except Exception:
+        pass
+
+
+# 启动时先截断/标记日志 (import 失败也无所谓, 我们已经定义好了)
+_truncate_stale_log()
+
+
+try:
+    from fastapi import FastAPI, HTTPException, Query
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel, Field
+
+    from data_sources import a_share, crypto
+    from indicators import compute_boll, boll_to_dicts
+    from indicators.registry import list_indicators, list_intervals, market_supports_interval
+    from scanner.matcher import PATTERN_LABELS
+    from scanner.service import (
+        IntervalRule,
+        ScanRequest,
+        scan,
+    )
+    from cache import db as cache_db
+    from cache import service as cache_service
+    from cache import repository as cache_repository
+    import settings as app_settings
+    import configs as app_configs
+except Exception as _e:
+    _log_startup_error("IMPORT", _e)
+    print(f"[FATAL] 导入阶段失败: {_e}", file=sys.stderr)
+    print(f"[FATAL] 详细堆栈: {_STARTUP_LOG}", file=sys.stderr)
+    raise
+
+
+# --------- 日志: 同时输出到 stdout 和按日期文件 ---------
+_APP_LOG = _LOG_DIR / "app.log"
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+try:
+    _fh = logging.FileHandler(_APP_LOG, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception as _e:
+    print(f"[WARN] 没法挂文件日志 handler: {_e}", file=sys.stderr)
 logger = logging.getLogger("app")
 
 
@@ -117,12 +180,43 @@ async def status():
 # --------- 形态列表 ---------
 @app.get("/api/patterns")
 async def list_patterns():
-    """支持的形态定义。"""
+    """支持的形态定义 (向后兼容: 仅 BOLL 形态)。"""
     return {
         "patterns": [
             {"key": k, "label": v}
             for k, v in PATTERN_LABELS.items()
         ]
+    }
+
+
+# --------- 指标 + 形态 + 支持周期 (新) ---------
+@app.get("/api/indicators")
+async def api_indicators(market: str = Query("a_share")):
+    """返回前端规则 UI 需要的全部元数据:
+      - indicators: 所有指标 + 每指标的所有形态 (含 value_required / value_label)
+      - intervals : 该 market 支持的周期 (按数据源过滤)
+      - markets   : 支持的市场 + 它们各自的周期
+    """
+    m = (market or "").lower().strip()
+    # 把 crypto / crypto_okx / crypto_binance 都归到 crypto 系列
+    if m in ("crypto", "crypto_okx", "crypto_binance", "binance", "okx"):
+        # 取一个合理的 provider, okx 系列按 okx 暴露 (OKX 没有 3d)
+        provider = "okx" if m in ("crypto_okx", "okx") else "binance"
+        intervals = crypto.supported_intervals(provider)
+    else:
+        intervals = a_share.supported_intervals()
+
+    markets = {
+        "a_share": a_share.supported_intervals(),
+        "crypto": crypto.supported_intervals("binance"),
+        "crypto_okx": crypto.supported_intervals("okx"),
+        "crypto_binance": crypto.supported_intervals("binance"),
+    }
+    return {
+        "indicators": list_indicators(),
+        "intervals": intervals,
+        "markets": markets,
+        "market": m or "a_share",
     }
 
 
@@ -214,8 +308,17 @@ async def api_crypto_kline(
 
 # --------- 扫描 ---------
 class RuleSchema(BaseModel):
+    """单条规则 (新 schema)。
+
+    兼容旧用法: 只填 interval + pattern (默认 indicator='boll')。
+    """
     interval: str = Field(..., description="时间周期, 如 5m / 15m / 1h / 1d")
     pattern: str = Field(..., description="形态 key, 如 cross_mid_up")
+    # 新字段 (可选)
+    indicator: Optional[str] = Field(None, description="指标 key, 如 boll / ma / macd / rsi / kdj / vol / price")
+    value: Optional[float] = Field(None, description="数值阈值 (vol/price/rsi/kdj 阈值时用)")
+    lookback: Optional[int] = Field(None, ge=10, le=2000, description="回看 K 线数")
+    match_count: Optional[int] = Field(None, ge=1, le=500, description="需要多少根 K 线匹配")
 
 
 class ScanSchema(BaseModel):
@@ -223,8 +326,19 @@ class ScanSchema(BaseModel):
     rules: List[RuleSchema]
     combine: str = Field("all", description="all (AND) | any (OR)")
     symbols: Optional[List[str]] = None
-    limit: int = Field(100, ge=20, le=500)
+    limit: int = Field(200, ge=20, le=1000)
     concurrency: int = Field(8, ge=1, le=32)
+
+
+def _to_interval_rule(r: RuleSchema) -> IntervalRule:
+    return IntervalRule(
+        interval=r.interval,
+        indicator=r.indicator or "boll",
+        pattern=r.pattern,
+        value=r.value,
+        lookback=r.lookback if r.lookback is not None else 200,
+        match_count=r.match_count if r.match_count is not None else 1,
+    )
 
 
 @app.post("/api/scan")
@@ -233,7 +347,7 @@ async def api_scan(body: ScanSchema):
         raise HTTPException(400, "至少需要一条规则")
     req = ScanRequest(
         market=body.market,
-        rules=[IntervalRule(r.interval, r.pattern) for r in body.rules],
+        rules=[_to_interval_rule(r) for r in body.rules],
         combine=body.combine,
         symbols=body.symbols,
         limit=body.limit,
@@ -287,7 +401,7 @@ async def api_scan_stream(body: ScanSchema):
 
     req = ScanRequest(
         market=body.market,
-        rules=[IntervalRule(r.interval, r.pattern) for r in body.rules],
+        rules=[_to_interval_rule(r) for r in body.rules],
         combine=body.combine,
         symbols=body.symbols,
         limit=body.limit,
@@ -493,6 +607,73 @@ async def api_settings_proxy_test():
         return {"ok": False, "message": f"代理失败: {e.__class__.__name__}: {str(e)[:120]}"}
 
 
+# --------- 规则配置 (多个配置, 每个一组规则) ---------
+@app.get("/api/configs")
+async def api_configs_list(market: Optional[str] = Query(None)):
+    """列出规则配置 + 当前选中的 id。
+
+    market: 给定时只返回该市场的配置, selected_id 也会按市场选。
+            不给时返回所有市场 (兼容老调用)。
+    """
+    return app_configs.list_configs(market=market)
+
+
+class ConfigCreateSchema(BaseModel):
+    name: Optional[str] = "新配置"
+    market: Optional[str] = "a_share"   # a_share | crypto | crypto_binance | crypto_okx
+    rules: Optional[List[dict]] = None
+
+
+@app.post("/api/configs")
+async def api_configs_create(body: ConfigCreateSchema):
+    """新建一个配置, 默认 1 条规则。 body: {name?: str, market?: str, rules?: list}"""
+    cfg = app_configs.create_config(
+        name=body.name or "新配置",
+        market=body.market or "a_share",
+        rules=body.rules,
+    )
+    return cfg
+
+
+class ConfigPatchSchema(BaseModel):
+    name: Optional[str] = None
+    rules: Optional[List[dict]] = None
+    market: Optional[str] = None
+
+
+@app.patch("/api/configs/{cid}")
+async def api_configs_patch(cid: str, body: ConfigPatchSchema):
+    """改名 / 改规则 / 改市场。 body: {name?, rules?, market?}"""
+    cfg = app_configs.update_config(
+        cid,
+        name=body.name,
+        rules=body.rules,
+        market=body.market,
+    )
+    if not cfg:
+        raise HTTPException(404, f"配置不存在: {cid}")
+    return cfg
+
+
+@app.delete("/api/configs/{cid}")
+async def api_configs_delete(cid: str):
+    """删除一个配置。 同市场自动选另一个, 同市场最后 1 个不删。"""
+    return app_configs.delete_config(cid)
+
+
+class ConfigSelectSchema(BaseModel):
+    id: str
+
+
+@app.post("/api/configs/select")
+async def api_configs_select(body: ConfigSelectSchema):
+    """切换当前选中的配置。"""
+    ok = app_configs.select_config(body.id)
+    if not ok:
+        raise HTTPException(404, f"配置不存在: {body.id}")
+    return {"selected_id": body.id}
+
+
 # --------- 静态前端 ---------
 
 
@@ -529,10 +710,20 @@ if FRONTEND_DIR.exists():
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        reload=os.getenv("RELOAD", "0") == "1",
-    )
+    try:
+        uvicorn.run(
+            "main:app",
+            host=os.getenv("HOST", "0.0.0.0"),
+            port=int(os.getenv("PORT", "8000")),
+            reload=os.getenv("RELOAD", "0") == "1",
+        )
+    except Exception as _e:
+        _log_startup_error("UVICORN_RUN", _e)
+        print(f"\n[FATAL] 启动失败: {_e}", file=sys.stderr)
+        print(f"[FATAL] 详细堆栈: {_STARTUP_LOG}", file=sys.stderr)
+        # 让窗口停住, 方便看到错误 (防止 .bat 闪退)
+        try:
+            input("\n按回车退出...")
+        except EOFError:
+            pass
+        raise

@@ -84,6 +84,11 @@ SINA_INTERVAL_MAP = {
     # 1m / 3d / 1M 暂不支持, 返回 []
 }
 
+# A 股对外支持的周期 (前端规则 UI 用)
+# - AKShare 全部 A_SHARE_INTERVAL_MAP 的 key
+# - Sina 仅子集, 但因为有自动回退, 标 AKShare 的全集
+A_SHARE_SUPPORTED_INTERVALS = list(A_SHARE_INTERVAL_MAP.keys())
+
 
 # --------- 股票列表 ---------
 _STOCK_LIST_CACHE: Optional[List[dict]] = None
@@ -315,6 +320,11 @@ def _sina_symbol_prefix(code: str) -> str:
     if code.startswith(("00", "30", "20")):
         return "sz"
     return "bj"
+
+
+def supported_intervals() -> List[str]:
+    """A 股数据源支持的周期列表 (前端规则 UI 用)。"""
+    return list(A_SHARE_SUPPORTED_INTERVALS)
 
 
 def pd_to_unix(ts) -> int:

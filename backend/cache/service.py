@@ -26,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 # --------- TTL 配置 ---------
 SYMBOL_TTL_SEC = 24 * 3600        # 标的列表 1 天
-KLINE_FRESH_SEC = 5 * 60           # K 线 5 分钟内视为新鲜, 直接读缓存
+# K 线缓存新鲜度窗口: 缓存里最后写入的时间距离现在多久以内就算新鲜, 直接返回不再拉。
+# 5 分钟 - 短周期 (1m/5m) 用得到; 1d K 线自然也会"够新鲜"。
+KLINE_FRESH_SEC = 5 * 60
+# 缓存里最后那根 K 线的开仓时间距离"该周期理论上的当前 bar"多远就认为过时。
+# 1d K 线允许 1.5 天滞后 (因为周末/假日不开盘), 1m 只允许 5 分钟。
+#   stale = (now - last_bar_open) - (elapsed_in_current_bar)
+# 我们用更简单的方式: 直接用 last_bar_open 距离"当前 bar 的预期 start"不超过 interval 的 N 倍。
 
 
 # --------- 周期 -> 秒数 (用于增量合并) ---------
@@ -35,6 +41,25 @@ INTERVAL_SECONDS = {
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
     "3d": 259200, "1w": 604800, "1M": 2592000,
 }
+
+
+def _max_stale_multiplier(interval: str) -> float:
+    """每周期允许 last_bar 滞后多少倍 interval。1d 给 1.5 (跨 1 天/周末), 1m 给 1.5。"""
+    iv_sec = INTERVAL_SECONDS.get(interval, 60)
+    if iv_sec >= 86400:    # 1d / 3d / 1w / 1M
+        return 1.5
+    if iv_sec >= 3600:     # 1h / 2h / 4h
+        return 2.0
+    return 1.5             # 短周期 1.5x
+
+
+def _is_last_bar_fresh(last_t: int, interval: str) -> bool:
+    """最后那根 K 线距今是否"还在合理范围" (用于决定要不要增量拉)。"""
+    iv_sec = INTERVAL_SECONDS.get(interval, 60)
+    now = time.time()
+    age = now - last_t
+    # 允许滞后 = interval * multiplier
+    return age <= iv_sec * _max_stale_multiplier(interval)
 
 
 # ============== 标的信息 ==============
@@ -79,16 +104,19 @@ async def get_or_fetch_klines(
     interval: str,
     limit: int = 200,
     force_refresh: bool = False,
+    provider: Optional[str] = None,
 ) -> List[list]:
     """获取 K 线: 缓存优先, 增量更新。
 
     强制刷新: 完全丢掉缓存重新拉 (用于 '清空缓存' 按钮)。
     默认: 查缓存最后时间, 增量拉新数据合并。
     no_cache=True: 直拉直回, 不读不写缓存。
+
+    provider: crypto 时指定 binance / okx (None -> 走 market 默认策略)。
     """
     if is_no_cache():
-        logger.debug("[no_cache] K 线直连: %s %s %s", market, symbol, interval)
-        return await _fetch_klines_from_source(market, symbol, interval, limit)
+        logger.info("[K线] 直连 (no_cache) %s %s %s", market, symbol, interval)
+        return await _fetch_klines_from_source(market, symbol, interval, limit, provider=provider)
     if force_refresh:
         # 删除该 symbol 的缓存, 走全量拉
         from cache.db import KlineRow
@@ -108,14 +136,18 @@ async def get_or_fetch_klines(
         rows = await _fetch_klines_from_source(market, symbol, interval, limit)
         if rows:
             await repo.upsert_klines(market, symbol, interval, rows)
+            logger.info("[K线] force_refresh 写回 %s %s %s (+%d 行)",
+                        market, symbol, interval, len(rows))
         return rows
 
     # 1) 看缓存新鲜度 + 数量是否够
     last_t = await repo.get_last_open_time(market, symbol, interval)
-    if last_t is not None and (time.time() - last_t) < KLINE_FRESH_SEC:
+    if last_t is not None and _is_last_bar_fresh(last_t, interval):
         cached = await repo.get_klines(market, symbol, interval, limit=limit, ascending=True)
         # 缓存足够 (新且够数量) -> 直接返回
         if cached and len(cached) >= limit:
+            logger.info("[K线] 命中缓存 %s %s %s (last_t=%d, %d 行)",
+                        market, symbol, interval, last_t, len(cached))
             return cached
 
     # 2) 缓存不够新或不够多, 增量拉
@@ -124,17 +156,22 @@ async def get_or_fetch_klines(
     if last_t is not None:
         start_time = last_t + interval_sec  # 下一根 K 线起点
 
+    logger.info("[K线] 缓存不足 %s %s %s (last_t=%s, start_time=%s, limit=%d), 拉数据源",
+                market, symbol, interval, last_t, start_time, limit)
+
     # 如果缓存里没数据或者数量明显不够, 走全量拉 (避免无限增量)
     if start_time is None:
         new_rows = await _fetch_klines_from_source(
-            market, symbol, interval, limit, start_time=None
+            market, symbol, interval, limit, start_time=None, provider=provider
         )
     else:
         new_rows = await _fetch_klines_from_source(
-            market, symbol, interval, limit, start_time=start_time
+            market, symbol, interval, limit, start_time=start_time, provider=provider
         )
     if new_rows:
         await repo.upsert_klines(market, symbol, interval, new_rows)
+        logger.info("[K线] 写回缓存 %s %s %s (+%d 行)",
+                    market, symbol, interval, len(new_rows))
 
     # 3) 合并: 缓存里所有 + 增量, 取最近 limit 根
     return await repo.get_klines(market, symbol, interval, limit=limit, ascending=True)
@@ -146,15 +183,21 @@ async def _fetch_klines_from_source(
     interval: str,
     limit: int,
     start_time: Optional[int] = None,
+    provider: Optional[str] = None,
 ) -> List[list]:
     """直接调数据源, 统一返回秒级时间戳。"""
     if market == "a_share":
         rows = await a_share.fetch_a_share_kline(symbol, interval, limit)
         # A 股 fetch 已经是秒级
         return rows
-    if market == "crypto_okx":
+    # crypto 系列
+    p = (provider or "").lower() if provider else ""
+    if p == "okx" or market == "crypto_okx":
         rows = await crypto_src.fetch_kline(symbol, interval, limit, provider="okx")
+    elif p == "binance":
+        rows = await crypto_src.fetch_kline(symbol, interval, limit, provider="binance")
     else:
+        # 默认: binance 优先, auto 回退 okx
         rows = await crypto_src.fetch_kline(symbol, interval, limit, provider="binance")
     # Crypto 原始是毫秒, 转秒
     return [[int(r[0] / 1000), *r[1:]] for r in rows]

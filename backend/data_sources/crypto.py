@@ -114,6 +114,25 @@ async def close_client():
         _OKX_CLIENT = None
 
 
+# --------- 对外支持的周期 (前端规则 UI 用) ---------
+# OKX 不支持 3d, 所以 crypto 标 "全周期但排除 3d"
+# Binance 全部支持, 取全集
+BINANCE_SUPPORTED_INTERVALS = list(BINANCE_INTERVAL_MAP.keys())
+OKX_SUPPORTED_INTERVALS = [k for k in OKX_BAR_MAP.keys()]
+# auto/binance 默认拿 Binance 全集; okx 用 OKX
+CRYPTO_SUPPORTED_INTERVALS = {
+    "binance": BINANCE_SUPPORTED_INTERVALS,
+    "okx":     OKX_SUPPORTED_INTERVALS,
+    "auto":    BINANCE_SUPPORTED_INTERVALS,   # auto 优先试 binance, 暴露其全集
+}
+
+
+def supported_intervals(provider: Optional[str] = None) -> List[str]:
+    """crypto 数据源支持的周期。 provider: binance | okx | auto | None (auto)"""
+    p = (provider or "auto").lower()
+    return list(CRYPTO_SUPPORTED_INTERVALS.get(p, BINANCE_SUPPORTED_INTERVALS))
+
+
 # --------- Binance 实现 ---------
 async def _binance_list(use_cache: bool = True) -> List[dict]:
     if use_cache and "binance" in _LIST_CACHE:

@@ -18,6 +18,7 @@ export const api = {
   health: () => _fetch('/health'),
   status: () => _fetch('/status'),
   patterns: () => _fetch('/patterns'),
+  indicators: (market = 'a_share') => _fetch(`/indicators?market=${encodeURIComponent(market)}`),
 
   aShareList: () => _fetch('/a-stocks/list'),
   aShareHs300: () => _fetch('/a-stocks/hs300'),
@@ -41,4 +42,12 @@ export const api = {
   settingsGet: () => _fetch('/settings'),
   settingsPut: (body) => _fetch('/settings', { method: 'PUT', body: JSON.stringify(body) }),
   settingsTestProxy: () => _fetch('/settings/proxy/test', { method: 'POST' }),
+
+  // 规则配置
+  configsList: (market = null) =>
+    _fetch('/configs' + (market ? `?market=${encodeURIComponent(market)}` : '')),
+  configsCreate: (body) => _fetch('/configs', { method: 'POST', body: JSON.stringify(body) }),
+  configsPatch: (id, body) => _fetch(`/configs/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  configsDelete: (id) => _fetch(`/configs/${id}`, { method: 'DELETE' }),
+  configsSelect: (id) => _fetch('/configs/select', { method: 'POST', body: JSON.stringify({ id }) }),
 };
