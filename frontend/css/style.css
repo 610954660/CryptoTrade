@@ -150,6 +150,98 @@ code { background: var(--bg-2); padding: 1px 6px; border-radius: 4px; font-size:
   border: 1px dashed var(--border); border-radius: var(--radius-sm);
 }
 
+/* ----------- 规则启用开关 (iOS 风格) ----------- */
+.rule .iv-enabled {
+  position: relative; display: inline-block; flex: 0 0 36px; height: 20px;
+  margin-right: 2px; cursor: pointer;
+}
+.rule .iv-enabled-cb {
+  opacity: 0; width: 0; height: 0; position: absolute;
+}
+.rule .iv-enabled-slider {
+  position: absolute; inset: 0;
+  background: rgba(120, 120, 120, 0.45);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+.rule .iv-enabled-slider::before {
+  content: ""; position: absolute;
+  height: 14px; width: 14px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%;
+  transition: transform 0.18s ease;
+}
+.rule .iv-enabled-cb:checked + .iv-enabled-slider {
+  background: var(--green, #22c55e);
+}
+.rule .iv-enabled-cb:checked + .iv-enabled-slider::before {
+  transform: translateX(16px);
+}
+.rule-disabled {
+  opacity: 0.5;
+  background: rgba(120, 120, 120, 0.05) !important;
+}
+.rule-disabled .iv-enabled-cb:checked + .iv-enabled-slider {
+  background: var(--muted, #888) !important;
+}
+
+/* ----------- 命中结果分页 ----------- */
+.result-pager {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 4px 4px 4px;
+  flex-wrap: wrap;
+}
+.result-pager .pager-page-size {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px; font-size: 13px;
+}
+
+/* ----------- 整组 K 线筛选总开关 (卡片右上角) ----------- */
+.rule-master-switch {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--muted); cursor: pointer;
+  user-select: none;
+}
+.rule-master-switch .rule-master-label {
+  font-weight: 600; color: var(--text);
+}
+.rule-master-switch input {
+  opacity: 0; width: 0; height: 0; position: absolute;
+}
+.rule-master-switch .rule-master-slider {
+  position: relative; display: inline-block;
+  width: 38px; height: 22px;
+  background: rgba(120, 120, 120, 0.45);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+.rule-master-switch .rule-master-slider::before {
+  content: ""; position: absolute;
+  height: 16px; width: 16px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%;
+  transition: transform 0.18s ease;
+}
+.rule-master-switch input:checked + .rule-master-slider {
+  background: var(--green, #22c55e);
+}
+.rule-master-switch input:checked + .rule-master-slider::before {
+  transform: translateX(16px);
+}
+.rule-master-switch input:not(:checked) + .rule-master-slider {
+  background: rgba(120, 120, 120, 0.45);
+}
+.rule-master-switch input:not(:checked) ~ .rule-master-label {
+  color: var(--muted);
+}
+/* 关闭时, 整个"筛选规则"卡片变灰, 提示用户此规则被跳过 */
+.rules-card-disabled {
+  opacity: 0.55;
+}
+.rules-card-disabled .rule-list,
+.rules-card-disabled .add-rule-btn,
+.rules-card-disabled .config-tabs {
+  pointer-events: none;
+}
+
 /* ----------- 配置页签栏 ----------- */
 .config-tabs {
   display: flex; align-items: center; gap: 4px;
@@ -389,3 +481,28 @@ code { background: var(--bg-2); padding: 1px 6px; border-radius: 4px; font-size:
 .settings-help summary { cursor: pointer; color: var(--muted); user-select: none; }
 .settings-help ul { margin: 8px 0 4px 0; padding-left: 18px; }
 .settings-help li { margin: 3px 0; }
+
+/* ============================================================
+   扫描复选筛选
+   ============================================================ */
+.scan-filters { display: flex; flex-direction: column; gap: 8px; }
+.scan-filter-group { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.scan-filter-label { min-width: 70px; color: var(--muted); font-size: 12px; padding-top: 6px; }
+.scan-filter-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.scan-filter-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 999px; cursor: pointer; user-select: none;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border, rgba(255,255,255,0.08));
+  font-size: 12px; transition: background 0.15s, border-color 0.15s;
+}
+.scan-filter-chip:hover { background: rgba(255,255,255,0.08); }
+.scan-filter-chip input { margin: 0; cursor: pointer; }
+.scan-filter-chip:has(input:checked) {
+  background: var(--primary); color: white; border-color: var(--primary);
+}
+
+/* ----------- 标的预筛 → 扫描按钮 (右下角) ----------- */
+.scan-filters-footer {
+  display: flex; justify-content: flex-end; align-items: center;
+  margin-top: 10px;
+}

@@ -50,4 +50,7 @@ export const api = {
   configsPatch: (id, body) => _fetch(`/configs/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   configsDelete: (id) => _fetch(`/configs/${id}`, { method: 'DELETE' }),
   configsSelect: (id) => _fetch('/configs/select', { method: 'POST', body: JSON.stringify({ id }) }),
+
+  // 扫描筛选维度
+  scanFilterOptions: (market) => _fetch('/scan/filter-options?market=' + encodeURIComponent(market)),
 };

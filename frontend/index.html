@@ -44,9 +44,14 @@
     </section>
 
     <!-- ====== 筛选规则 (配置 + 规则) ====== -->
-    <section class="card">
+    <section class="card" id="rules-card">
       <div class="card-head">
         <h2>筛选规则</h2>
+        <label class="rule-master-switch" title="关闭后, 扫描将跳过所有 K 线规则, 直接把标的预筛的池子全部输出为命中">
+          <span class="rule-master-label">启用</span>
+          <input type="checkbox" id="rule-master-enabled" checked>
+          <span class="rule-master-slider"></span>
+        </label>
       </div>
       <p class="muted small" style="margin-top:0">
         每个页签是一个独立配置 (一组规则)。 切换页签 = 换一套筛选策略; 扫描按当前选中的配置执行。
@@ -63,12 +68,18 @@
       <div class="config-actions" id="config-actions" style="margin-top:8px"></div>
     </section>
 
-    <!-- ====== 操作区 ====== -->
-    <section class="card">
-      <div class="actions">
-        <button id="btn-scan" class="btn primary big">🔍 扫描全市场</button>
-        <button id="btn-scan-sample" class="btn ghost">仅扫描前 50 个</button>
-        <button id="btn-scan-hs300" class="btn ghost" data-market="a_share">⭐ 沪深 300</button>
+    <!-- ====== 扫描复选筛选 (按市场动态渲染) + 扫描按钮 ====== -->
+    <section class="card" id="scan-filters-card" style="display:none">
+      <div class="card-head" style="margin-bottom:6px">
+        <h2 style="font-size:14px">🎯 标的预筛</h2>
+        <button id="scan-filters-clear" class="btn small ghost" type="button">清空</button>
+      </div>
+      <div id="scan-filters" class="scan-filters">
+        <div class="muted small">按市场加载筛选…</div>
+      </div>
+      <div class="muted small" id="scan-filters-hint" style="margin-top:6px"></div>
+      <div class="scan-filters-footer">
+        <button id="btn-scan" class="btn primary big">🔍 扫描</button>
       </div>
       <div id="progress" class="progress hidden">
         <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
@@ -100,6 +111,18 @@
             <tr class="empty"><td colspan="5">暂无结果, 配置规则后点击"扫描"</td></tr>
           </tbody>
         </table>
+      </div>
+      <div id="result-pager" class="result-pager">
+        <button id="pager-prev" class="btn small" disabled>‹ 上一页</button>
+        <span id="pager-info" class="muted small">第 0 / 0 页</span>
+        <button id="pager-next" class="btn small" disabled>下一页 ›</button>
+        <span class="muted small" style="margin-left:8px">每页</span>
+        <select id="pager-page-size" class="pager-page-size">
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="200">200</option>
+          <option value="500">500</option>
+        </select>
       </div>
     </section>
   </main>

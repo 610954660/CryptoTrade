@@ -37,6 +37,7 @@ class SymbolRow(Base):
     code = Column(String(16), nullable=True)        # A 股 code 冗余
     name = Column(String(128), nullable=True)
     display = Column(String(160), nullable=True)
+    tags = Column(String(256), nullable=True)       # JSON 数组字符串, e.g. '["双融","蓝筹"]'
     last_updated = Column(BigInteger, nullable=False)  # 秒级时间戳
 
 
@@ -77,11 +78,27 @@ async def get_engine():
 
 
 async def init_db():
-    """建表 (首次启动时调用)。"""
+    """建表 (首次启动时调用)。 旧表加列走幂等 ALTER。"""
     engine = await get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # 幂等迁移: 给已存在的 symbols 表补 tags 列 (create_all 不会改老表)
+    await _ensure_column("symbols", "tags", "VARCHAR(256)")
     logger.info("缓存 DB 初始化完成: %s", DB_PATH)
+
+
+async def _ensure_column(table: str, column: str, col_type: str):
+    """若指定列不存在, ALTER TABLE 加上去。 幂等。"""
+    try:
+        async with await get_session() as s:
+            r = await s.execute(text(f"PRAGMA table_info({table})"))
+            cols = {row[1] for row in r.fetchall()}
+            if column not in cols:
+                await s.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                await s.commit()
+                logger.info("迁移: %s 表新增列 %s (%s)", table, column, col_type)
+    except Exception as e:
+        logger.warning("迁移 %s.%s 失败: %s", table, column, e)
 
 
 async def get_session() -> AsyncSession:

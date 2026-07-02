@@ -37,6 +37,26 @@ BINANCE_INTERVAL_MAP = {
     "1w": "1w", "1M": "1M",
 }
 
+# --------- 主流币 (硬编码) ---------
+BLUECHIP_BASES = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX",
+    "LINK", "DOT", "MATIC", "TRX", "UNI", "ATOM", "LTC", "ETC",
+    "XLM", "NEAR", "APT", "ARB", "OP", "TON", "ICP", "FIL",
+    "HBAR", "INJ", "SUI", "SEI", "RUNE", "AAVE", "MKR", "LDO",
+})
+
+
+def derive_crypto_tags(base: str, quote: str) -> List[str]:
+    """从 base/quote 派生标签: 主流币 / 计价币种。"""
+    tags: List[str] = []
+    if base and base.upper() in BLUECHIP_BASES:
+        tags.append("bluechip_yes")
+    else:
+        tags.append("bluechip_no")
+    if quote:
+        tags.append(f"quote_{quote.upper()}")
+    return tags
+
 
 # --------- OKX 配置 ---------
 OKX_BASE = "https://www.okx.com"
@@ -173,11 +193,14 @@ async def _binance_list(use_cache: bool = True) -> List[dict]:
                     continue
                 if s.get("contractType") != "PERPETUAL":
                     continue
+                base = s["baseAsset"]
+                quote = s["quoteAsset"]
                 items.append({
                     "symbol": s["symbol"],
-                    "base": s["baseAsset"],
-                    "quote": s["quoteAsset"],
-                    "display": f'{s["baseAsset"]}/{s["quoteAsset"]}',
+                    "base": base,
+                    "quote": quote,
+                    "display": f'{base}/{quote}',
+                    "tags": derive_crypto_tags(base, quote),
                 })
             logger.info("Binance: 成功 endpoint=%s, 加载 %d 个合约", base, len(items))
             _LIST_CACHE["binance"] = items
@@ -243,11 +266,13 @@ async def _okx_list(use_cache: bool = True) -> List[dict]:
         if not s["instId"].endswith("-USDT-SWAP"):
             continue
         base = s.get("uly", "").split("-")[0] or s["instId"].split("-")[0]
+        quote = "USDT"
         items.append({
             "symbol": s["instId"],      # 用 OKX 的 instId 作为 key, 例 "BTC-USDT-SWAP"
             "base": base,
-            "quote": "USDT",
-            "display": f'{base}/USDT',
+            "quote": quote,
+            "display": f'{base}/{quote}',
+            "tags": derive_crypto_tags(base, quote),
         })
     logger.info("OKX: 加载 %d 个 USDT 永续", len(items))
     _LIST_CACHE["okx"] = items

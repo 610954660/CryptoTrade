@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -152,6 +153,140 @@ async def list_a_stocks(use_cache: bool = True) -> List[dict]:
     _STOCK_LIST_CACHE = items
     logger.info("已加载 A 股列表: %d 只", len(items))
     return items
+
+
+# ============== 标签: 派生 (纯本地) + 外部 (AKShare) ==============
+
+def derive_a_share_tags(code: str, name: str) -> List[str]:
+    """从代码前缀 / 名称派生出固定标签。 不读网络, 不写缓存。
+
+    标签 (互斥 + 风险):
+      exchange: sh / sz / bj
+      board:    main / star / chinext / bse
+      warning:  st (含 *ST)
+    """
+    tags: List[str] = []
+    c = (code or "").strip()
+    n = (name or "").upper()
+
+    # 交易所 + 板块 (代码前缀, 互斥)
+    # 沪市主板: 60/601/603/605; 科创板: 688/689; 沪其它: 51/5xxxx 等
+    if c.startswith(("60", "601", "603", "605")):
+        tags.append("sh")
+        tags.append("main")
+    elif c.startswith(("688", "689")):
+        tags.append("sh")
+        tags.append("star")
+    # 深市主板/中小板: 00/001/002/003; 创业板: 30x (300/301/302)
+    elif c.startswith(("00", "001", "002", "003", "300", "301", "302")):
+        tags.append("sz")
+        if c.startswith(("300", "301", "302")):
+            tags.append("chinext")
+        else:
+            tags.append("main")
+    else:
+        # 4/8/92 开头: 北证
+        tags.append("bj")
+        tags.append("bse")
+
+    # 风险警示
+    if "ST" in n:
+        tags.append("st")
+
+    return tags
+
+
+# 缓存最近一次外部 tags 拉取结果 (进程内, 避免每扫一次都拉)
+_EXTERNAL_TAGS_CACHE: dict = {"ts": 0.0, "data": {}}
+_EXTERNAL_TAGS_TTL = 7 * 24 * 3600  # 7 天
+
+
+async def fetch_a_share_external_tags() -> dict:
+    """从 AKShare 拉 双融 / 蓝筹 / 白马 标签, 返回 {code: ['双融','蓝筹',...]}。
+
+    7 次 AKShare call 全部并行 (asyncio.gather + asyncio.to_thread), 单次失败不影响其他。
+    进程内 LRU 缓存 7 天。
+    """
+    now = time.time()
+    if now - _EXTERNAL_TAGS_CACHE["ts"] < _EXTERNAL_TAGS_TTL and _EXTERNAL_TAGS_CACHE["data"]:
+        return _EXTERNAL_TAGS_CACHE["data"]
+
+    # 计算最近一个交易日 (YYYYMMDD): 周末/节假日回退到上一个工作日
+    trade_date = _last_trade_date_str()
+
+    async def _margin_pa(symbol: str) -> set:
+        """拉一份双融标的 (沪/深/北) - 平安证券接口。"""
+        def _do():
+            with _no_proxy():
+                df = ak.stock_margin_ratio_pa(symbol=symbol, date=trade_date)
+            codes = set()
+            if df is None or df.empty:
+                return codes
+            for v in df["证券代码"].astype(str).tolist():
+                codes.add(v.zfill(6))
+            return codes
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            logger.warning("拉取双融 %s 失败: %s", symbol, e)
+            return set()
+
+    async def _index_cons(symbol: str) -> set:
+        """拉一份指数成分股 (代码)。"""
+        def _do():
+            with _no_proxy():
+                df = ak.index_stock_cons_weight_csindex(symbol=symbol)
+            col = "成分券代码" if "成分券代码" in df.columns else df.columns[1]
+            codes = set()
+            for v in df[col].astype(str).tolist():
+                codes.add(v.zfill(6))
+            return codes
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            logger.warning("拉取指数 %s 失败: %s", symbol, e)
+            return set()
+
+    # 并行: 3 个双融 + 2 个蓝筹 (上证50+HS300) + 2 个白马 (HS300+中证100)
+    margin_sh, margin_sz, margin_bj, sse50, hs300, csi100 = await asyncio.gather(
+        _margin_pa("沪市"),
+        _margin_pa("深市"),
+        _margin_pa("北交所"),
+        _index_cons("000016"),  # 上证50
+        _index_cons("000300"),  # 沪深300
+        _index_cons("000903"),  # 中证100
+    )
+
+    margin_all = margin_sh | margin_sz | margin_bj
+    bluechip = sse50 | hs300   # 蓝筹
+    whitehorse = hs300 | csi100  # 白马
+
+    result: dict = {}
+    for code in margin_all | bluechip | whitehorse:
+        tags = []
+        if code in margin_all:
+            tags.append("双融")
+        if code in bluechip:
+            tags.append("蓝筹")
+        if code in whitehorse:
+            tags.append("白马")
+        result[code] = tags
+
+    _EXTERNAL_TAGS_CACHE["ts"] = now
+    _EXTERNAL_TAGS_CACHE["data"] = result
+    logger.info("外部标签就绪: 双融=%d 蓝筹=%d 白马=%d 覆盖=%d",
+                len(margin_all), len(bluechip), len(whitehorse), len(result))
+    return result
+
+
+def _last_trade_date_str() -> str:
+    """返回最近一个交易日的 YYYYMMDD 字符串 (考虑周末)。"""
+    import datetime as _dt
+    d = _dt.date.today()
+    # 周末回退 (5=周六, 6=周日)
+    while d.weekday() >= 5:
+        d -= _dt.timedelta(days=1)
+    return d.strftime("%Y%m%d")
 
 
 # --------- 单只 K 线 ---------

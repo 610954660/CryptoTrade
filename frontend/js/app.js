@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { ConfigManager } from './config-manager.js';
 import { KLineChart } from './chart.js';
 import { openSettings } from './settings.js';
+import { ScanFilters } from './scan-filters.js';
 
 const state = {
   market: 'crypto_okx',     // 当前选中的市场 (默认 OKX, 大陆可直连)
@@ -10,9 +11,38 @@ const state = {
   hits: [],
   sampleOnly: false,
   scanning: false,
+  /** { [groupKey]: [optionKey, ...] } 来自 ScanFilters, 传给后端做预筛 */
+  tagFilters: {},
+  /** K 线筛选总开关: false 时跳过 pipeline, 直接把标的预筛池全部输出 */
+  klineFilterEnabled: true,
+  /** 分页 */
+  page: 1,
+  pageSize: 100,
 };
 
 const STORAGE_KEY = 'boll-scanner:rules';
+const UI_CACHE_KEY = 'boll-scanner:ui:v1';
+
+/** UI 状态按市场分缓存: { a_share: {tagFilters, klineFilterEnabled}, crypto: {...}, crypto_okx: {...} } */
+function loadUiCache() {
+  try {
+    const raw = localStorage.getItem(UI_CACHE_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) || {};
+  } catch { return {}; }
+}
+function saveUiCache(obj) {
+  try { localStorage.setItem(UI_CACHE_KEY, JSON.stringify(obj)); } catch {}
+}
+function getMarketCache(market) {
+  const all = loadUiCache();
+  return all[market] || {};
+}
+function setMarketCache(market, patch) {
+  const all = loadUiCache();
+  all[market] = { ...(all[market] || {}), ...patch };
+  saveUiCache(all);
+}
 
 // ----- 工具 -----
 const $ = (sel) => document.querySelector(sel);
@@ -112,15 +142,21 @@ async function loadPatterns() {
 async function runScan(scope = 'all') {
   if (state.scanning) return;
   const allRules = cfgMgr.getSelectedRules();
-  if (!allRules.length) {
-    alert('当前配置没有规则, 请先在下方添加。');
-    return;
-  }
-  // 过滤掉未填完整的 (空 interval/pattern/indicator)
-  const validRules = allRules.filter((r) => r.interval && r.indicator && r.pattern);
-  if (!validRules.length) {
-    alert('当前配置的规则都没填完整 (周期/指标/形态)。\n请在下拉框里选择具体的值。');
-    return;
+  let validRules = [];
+  // K 线筛选关闭: 不校验规则, 跳过 pipeline, 直接把标的预筛池全部当命中
+  if (!state.klineFilterEnabled) {
+    // 即便关闭了 K 线筛选, 也允许空规则: 后端走"无规则"分支, 输出全部标的预筛池
+  } else {
+    if (!allRules.length) {
+      alert('当前配置没有规则, 请先在下方添加。');
+      return;
+    }
+    // 过滤掉未填完整的 (空 interval/pattern/indicator)
+    validRules = allRules.filter((r) => r.interval && r.indicator && r.pattern);
+    if (!validRules.length) {
+      alert('当前配置的规则都没填完整 (周期/指标/形态)。\n请在下拉框里选择具体的值。');
+      return;
+    }
   }
   // 提示有未保存修改 (但不阻塞扫描 - 用内存中的最新规则跑)
   if (cfgMgr.isDirty()) {
@@ -137,9 +173,7 @@ async function runScan(scope = 'all') {
   }
 
   const btn = $('#btn-scan');
-  const btnSample = $('#btn-scan-sample');
-  const btnHs300 = $('#btn-scan-hs300');
-  [btn, btnSample, btnHs300].forEach((b) => (b.disabled = true));
+  btn.disabled = true;
   btn.textContent = '扫描中…';
 
   setProgress(0, '准备中…', 0);
@@ -148,11 +182,16 @@ async function runScan(scope = 'all') {
   // 先决定 symbol 列表
   let body = {
     market: state.market,
-    rules: validRules,  // 过滤掉未填完整的
+    rules: validRules,  // 过滤掉未填完整的 (K线关闭时这里就是空数组)
     combine: 'all',
     limit: 100,
     concurrency: 8,
+    kline_filter_enabled: state.klineFilterEnabled,  // 总开关
   };
+  // 复选筛选 (空对象 = 不限, 后端走全市场)
+  if (state.tagFilters && Object.keys(state.tagFilters).length) {
+    body.tag_filters = state.tagFilters;
+  }
 
   try {
     if (scope === 'sample') {
@@ -167,12 +206,15 @@ async function runScan(scope = 'all') {
   } catch (e) {
     alert('拉取股票列表失败: ' + e.message);
     state.scanning = false;
-    [btn, btnSample, btnHs300].forEach((b) => (b.disabled = false));
-    btn.textContent = '🔍 扫描全市场';
+    [btn].forEach((b) => (b.disabled = false));
+    btn.textContent = '🔍 扫描';
     return;
   }
 
   state.hits = [];
+  state.page = 1;
+  _renderedSymbols.clear();
+  _tbRowCount = 0;
   $('#hit-count').textContent = 0;
   $('#result-tbody').innerHTML = '<tr class="empty"><td colspan="5">扫描中…</td></tr>';
 
@@ -208,11 +250,16 @@ async function runScan(scope = 'all') {
               last_mid: data.latest_hit.last_mid,
               rules: data.latest_hit.rules,
             });
-            renderResults();
+            appendNewHits();  // 追加式: 保留按钮焦点 / 监听 / 滚动
           }
         } else if (rawEvent === 'done') {
           setProgress(100, `完成 · 命中 ${data.hit_count} · 用时 ${data.elapsed_sec}s · 错误 ${data.errors}`, 0);
           setLastScanInfo(`上次扫描 ${timeNow()} · ${state.market} · 命中 ${data.hit_count}`);
+          // K线筛选关闭时, progress 事件没有携带 hit; 后端把所有 hit 放在 done 事件里补齐
+          if (data.hits && data.hits.length && state.hits.length === 0) {
+            state.hits = data.hits;
+            renderResults();
+          }
           // 扫描完成: 缓存有新行, 刷新一次缓存状态 (不再定时)
           refreshCacheStatus();
         } else if (rawEvent === 'error') {
@@ -242,8 +289,8 @@ async function runScan(scope = 'all') {
     });
   });
 
-  [btn, btnSample, btnHs300].forEach((b) => (b.disabled = false));
-  btn.textContent = '🔍 扫描全市场';
+  [btn].forEach((b) => (b.disabled = false));
+  btn.textContent = '🔍 扫描';
   state.scanning = false;
 }
 
@@ -266,76 +313,166 @@ function setProgress(pct, text, liveHits) {
 }
 
 // ----- 结果渲染 -----
+/** 已渲染的 hit symbol 集合 (避免重复 append)。 */
+const _renderedSymbols = new Set();
+/** 当前 tbody 中实际可见的 row 数量 (实时刷新统计用)。 */
+let _tbRowCount = 0;
+
+function rowHtml(h) {
+  const tags = Object.values(h.rules || {}).map((r) =>
+    `<span class="tag ${patternTagClass(r.pattern)}" title="${(r.detail || '').replace(/"/g, '&quot;')}">${r.interval} · ${r.pattern_label || r.pattern}</span>`
+  ).join('');
+  const price = fmtPrice(h.last_close);
+  return `
+    <tr data-symbol="${h.symbol}" data-market="${state.market}">
+      <td><code>${h.symbol}</code></td>
+      <td>${h.name || '-'}</td>
+      <td>${tags || '-'}</td>
+      <td>${price}</td>
+      <td><button class="btn small" data-act="view">查看 K 线</button></td>
+    </tr>
+  `;
+}
+
+/** 全量重渲 (用于分页切换 / 过滤变化 / 扫描开始清空)。 会重建 tbody, 重建后 _renderedSymbols 重新填充。 */
 function renderResults() {
   const tb = $('#result-tbody');
   const filter = ($('#filter-input').value || '').trim().toUpperCase();
   $('#hit-count').textContent = state.hits.length;
 
-  if (!state.hits.length) {
-    tb.innerHTML = `<tr class="empty"><td colspan="5">未命中标的</td></tr>`;
-    return;
-  }
-
-  const rows = state.hits.filter((h) =>
+  const filtered = state.hits.filter((h) =>
     !filter || h.symbol.toUpperCase().includes(filter) || (h.name || '').toUpperCase().includes(filter)
   );
 
-  tb.innerHTML = rows.map((h) => {
-    const tags = Object.values(h.rules || {}).map((r) =>
-      `<span class="tag ${patternTagClass(r.pattern)}" title="${r.detail || ''}">${r.interval} · ${r.pattern_label || r.pattern}</span>`
-    ).join('');
-    const price = fmtPrice(h.last_close);
-    return `
-      <tr data-symbol="${h.symbol}" data-market="${state.market}">
-        <td><code>${h.symbol}</code></td>
-        <td>${h.name || '-'}</td>
-        <td>${tags || '-'}</td>
-        <td>${price}</td>
-        <td><button class="btn small" data-act="view">查看 K 线</button></td>
-      </tr>
-    `;
-  }).join('');
+  const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
+  if (state.page > totalPages) state.page = totalPages;
+  if (state.page < 1) state.page = 1;
+  const start = (state.page - 1) * state.pageSize;
+  const pageRows = filtered.slice(start, start + state.pageSize);
 
-  if (!rows.length) {
-    tb.innerHTML = `<tr class="empty"><td colspan="5">没有匹配的标的</td></tr>`;
+  const pager = $('#result-pager');
+  if (pager) {
+    pager.style.display = filtered.length ? '' : 'none';
+    $('#pager-info').textContent = `第 ${state.page} / ${totalPages} 页 · 共 ${filtered.length} 条`;
+    $('#pager-prev').disabled = state.page <= 1;
+    $('#pager-next').disabled = state.page >= totalPages;
+  }
+
+  if (!state.hits.length) {
+    tb.innerHTML = `<tr class="empty"><td colspan="5">未命中标的</td></tr>`;
+    _renderedSymbols.clear();
+    _tbRowCount = 0;
     return;
   }
 
-  tb.querySelectorAll('button[data-act="view"]').forEach((b) => {
-    b.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const tr = b.closest('tr');
-      const symbol = tr.dataset.symbol;
-      const hit = state.hits.find((h) => h.symbol === symbol);
-      const display = `${hit.name || ''} (${hit.symbol})`;
-      // 从规则对象里取 interval (不再用 key, key 已经是 "ri|iv|ind|pat" 复合形式)
-      const firstRule = Object.values(hit.rules || {})[0];
-      const defaultIv = (firstRule && firstRule.interval) || '1d';
-      chart.show(state.market, symbol, display, defaultIv, state.provider);
-    });
-  });
+  if (!pageRows.length) {
+    tb.innerHTML = `<tr class="empty"><td colspan="5">没有匹配的标的</td></tr>`;
+    _renderedSymbols.clear();
+    _tbRowCount = 0;
+    return;
+  }
+
+  tb.innerHTML = pageRows.map(rowHtml).join('');
+  _renderedSymbols.clear();
+  for (const h of pageRows) _renderedSymbols.add(h.symbol);
+  _tbRowCount = pageRows.length;
+}
+
+/** 追加式渲染: 只把 state.hits 里新增的 symbol 追加到 tbody 末尾。 不动已渲染的行。
+ *  这样 SSE 实时推 hit 时不会重建 DOM, 按钮焦点 / 监听 / 滚动位置全保留。
+ *  同时更新顶部命中计数 + 进度文本。 */
+function appendNewHits() {
+  if (!state.hits.length) return;
+  const tb = $('#result-tbody');
+  const newOnes = state.hits.filter((h) => !_renderedSymbols.has(h.symbol));
+  if (!newOnes.length) {
+    $('#hit-count').textContent = state.hits.length;
+    return;
+  }
+  // 用 DocumentFragment 一次性插入, 减少 layout
+  const frag = document.createDocumentFragment();
+  for (const h of newOnes) {
+    const wrap = document.createElement('tbody'); // 临时容器解析 HTML
+    wrap.innerHTML = rowHtml(h).trim();
+    const tr = wrap.firstElementChild;
+    if (tr) {
+      frag.appendChild(tr);
+      _renderedSymbols.add(h.symbol);
+    }
+  }
+  // 替换"扫描中…"占位行 (如果有)
+  if (_tbRowCount === 0) {
+    const empty = tb.querySelector('tr.empty');
+    if (empty) empty.remove();
+  }
+  tb.appendChild(frag);
+  _tbRowCount = tb.querySelectorAll('tr').length;
+  $('#hit-count').textContent = state.hits.length;
 }
 
 // ----- 市场切换 -----
 function bindMarketSwitch() {
   $$('.seg-btn').forEach((b) => {
     b.addEventListener('click', () => {
+      const newMarket = b.dataset.market;
+      const newProvider = b.dataset.provider || 'binance';
+      // 1) 缓存当前市场的 UI 状态 (切换前先存)
+      if (state.market) {
+        setMarketCache(state.market, {
+          tagFilters: state.tagFilters || {},
+          klineFilterEnabled: state.klineFilterEnabled,
+        });
+      }
+      // 2) 切换 active
       $$('.seg-btn').forEach((x) => x.classList.remove('active'));
       b.classList.add('active');
-      state.market = b.dataset.market;
-      state.provider = b.dataset.provider || 'binance';
+      state.market = newMarket;
+      state.provider = newProvider;
       state.hits = [];
-      renderResults();
+      state.page = 1;
+      // 3) 从缓存恢复新市场的 UI 状态
+      const cached = getMarketCache(newMarket);
+      const cachedFilters = cached.tagFilters || {};
+      const cachedEnabled = cached.klineFilterEnabled !== false;
+      state.klineFilterEnabled = cachedEnabled;
       // 通知 ConfigManager 按市场重拉指标 + 配置
       if (cfgMgr) cfgMgr.setMarket(state.market);
+      // 通知 ScanFilters 按市场重渲染复选, 传缓存的勾选
+      if (scanFilters) scanFilters.setMarket(state.market, cachedFilters);
+      // 应用 master 开关状态
+      const masterCb = $('#rule-master-enabled');
+      if (masterCb) {
+        masterCb.checked = cachedEnabled;
+        masterCb.dispatchEvent(new Event('change'));
+      }
+      // 同步 state.tagFilters 供下次 runScan 用
+      state.tagFilters = cachedFilters;
+      // 4) 记下最后选中的市场 (现在 state.market 已是新值)
+      const all = loadUiCache();
+      all._lastMarket = state.market;
+      saveUiCache(all);
+      renderResults();
     });
   });
 }
 
 // ----- 启动 -----
-let cfgMgr, chart;
+let cfgMgr, chart, scanFilters;
 
 async function init() {
+  // 优先从缓存恢复选中市场 (用户上次停在哪就停在哪)
+  try {
+    const ui = loadUiCache();
+    if (ui._lastMarket && ['crypto', 'crypto_okx', 'a_share'].includes(ui._lastMarket)) {
+      state.market = ui._lastMarket;
+      state.provider = ui._lastMarket === 'crypto' ? 'binance' : (ui._lastMarket === 'crypto_okx' ? 'okx' : 'a_share');
+    }
+  } catch {}
+  // 把对应按钮设为 active
+  $$('.seg-btn').forEach((b) => {
+    if (b.dataset.market === state.market) b.classList.add('active');
+    else b.classList.remove('active');
+  });
   // 配置 + 规则管理 (多配置 + 持久化在后端)
   cfgMgr = new ConfigManager({
     tabsEl: $('#config-tabs'),
@@ -361,10 +498,81 @@ async function init() {
   });
 
   bindMarketSwitch();
+
+  // 扫描复选筛选
+  scanFilters = new ScanFilters({
+    container: $('#scan-filters'),
+    card: $('#scan-filters-card'),
+    hintEl: $('#scan-filters-hint'),
+    clearBtnEl: $('#scan-filters-clear'),
+    onChange: (filters) => {
+      state.tagFilters = filters;
+      // 缓存当前市场的 tagFilters
+      setMarketCache(state.market, { tagFilters: filters });
+      // 顶部"🔍 扫描"按钮旁显示已选数
+      const n = Object.values(filters).reduce((s, arr) => s + arr.length, 0);
+      const scanBtn = $('#btn-scan');
+      if (scanBtn) scanBtn.textContent = n ? `🔍 扫描 (已筛 ${n} 项)` : '🔍 扫描';
+    },
+  });
+  // 初始化时, 把当前市场的缓存复选应用上
+  const initCached = getMarketCache(state.market);
+  state.tagFilters = initCached.tagFilters || {};
+  state.klineFilterEnabled = initCached.klineFilterEnabled !== false;
+  // 设置 master 开关初值 (change handler 会读 cb.checked)
+  const _initMasterCb = $('#rule-master-enabled');
+  if (_initMasterCb) _initMasterCb.checked = state.klineFilterEnabled;
+  await scanFilters.setMarket(state.market, state.tagFilters);
+
+  // 事件委托: 一次绑 #result-tbody 的 click, 处理所有 [data-act="view"] 按钮
+  // 避免每次 renderResults() 重建 DOM 时丢失按钮事件
+  $('#result-tbody').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act="view"]');
+    if (!btn) return;
+    e.stopPropagation();
+    const tr = btn.closest('tr');
+    if (!tr) return;
+    const symbol = tr.dataset.symbol;
+    const hit = state.hits.find((h) => h.symbol === symbol);
+    if (!hit) return;
+    const display = `${hit.name || ''} (${hit.symbol})`;
+    const firstRule = Object.values(hit.rules || {})[0];
+    const defaultIv = (firstRule && firstRule.interval) || '1d';
+    chart.show(state.market, symbol, display, defaultIv, state.provider);
+  });
+
   $('#btn-scan').addEventListener('click', () => runScan('all'));
-  $('#btn-scan-sample').addEventListener('click', () => runScan('sample'));
-  $('#btn-scan-hs300').addEventListener('click', () => runScan('hs300'));
-  $('#filter-input').addEventListener('input', renderResults);
+  $('#filter-input').addEventListener('input', () => {
+    state.page = 1;  // 过滤变化 -> 重置到第 1 页
+    renderResults();
+  });
+
+  // 分页
+  $('#pager-prev').addEventListener('click', () => {
+    if (state.page > 1) { state.page--; renderResults(); }
+  });
+  $('#pager-next').addEventListener('click', () => {
+    state.page++; renderResults();
+  });
+  $('#pager-page-size').addEventListener('change', (e) => {
+    state.pageSize = parseInt(e.target.value, 10) || 100;
+    state.page = 1;
+    renderResults();
+  });
+
+  // K 线筛选总开关: 控制是否走 pipeline
+  const masterCb = $('#rule-master-enabled');
+  const rulesCard = $('#rules-card');
+  function applyMasterSwitch() {
+    state.klineFilterEnabled = !!masterCb.checked;
+    if (rulesCard) rulesCard.classList.toggle('rules-card-disabled', !state.klineFilterEnabled);
+  }
+  masterCb.addEventListener('change', applyMasterSwitch);
+  masterCb.addEventListener('change', () => {
+    // 缓存到当前市场
+    setMarketCache(state.market, { klineFilterEnabled: !!masterCb.checked });
+  });
+  applyMasterSwitch();
   $('#btn-open-settings').addEventListener('click', () => {
     openSettings({
       onChange: () => {

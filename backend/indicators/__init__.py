@@ -58,6 +58,37 @@ def compute_all(klines) -> IndicatorSet:
     )
 
 
+# 指标 key -> 计算函数 (bars 形式入参; bars = to_indicator_set(klines))
+_INDICATOR_FNS = {
+    "boll":  compute_boll,
+    "ma":    compute_ma,
+    "macd":  compute_macd,
+    "rsi":   compute_rsi,
+    "kdj":   compute_kdj,
+    "vol":   compute_vol_stats,
+    "price": compute_price_stats,
+}
+
+
+def compute_indicators_needed(klines, needed: set[str]) -> IndicatorSet:
+    """按需计算: 只算 needed 里包含的指标 (例 {"boll"})。 bars 总是算 (matcher 需要)。
+
+    needed: {"boll"} | {"boll","ma"} | {"all"} | None(=全集)
+    """
+    if not klines:
+        return IndicatorSet()
+    bars = to_indicator_set(klines)
+    if not needed or "all" in needed:
+        return compute_all(klines)
+    out = IndicatorSet(bars=bars)
+    for key in needed:
+        fn = _INDICATOR_FNS.get(key)
+        if fn is None:
+            continue
+        setattr(out, key, fn(bars))
+    return out
+
+
 __all__ = [
     "INDICATORS",
     "list_intervals",

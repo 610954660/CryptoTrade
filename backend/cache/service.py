@@ -64,10 +64,19 @@ def _is_last_bar_fresh(last_t: int, interval: str) -> bool:
 
 # ============== 标的信息 ==============
 async def get_or_fetch_symbols(market: str, force_refresh: bool = False) -> List[dict]:
-    """获取标的信息, 优先走缓存。market: a_share | crypto | crypto_okx"""
+    """获取标的信息, 优先走缓存。market: a_share | crypto | crypto_okx
+
+    A 股返回的每个 item 都附 `tags` 字段:
+      - 派生 (上交所/深交所/北交所/主板/科创板/创业板/北证/ST): 每次按 code/name 重算
+      - 外部 (双融/蓝筹/白马): 进程内 7 天 LRU, 首次调 AKShare
+    Crypto 每个 item 已在数据源层带 `tags` (主流币/USDT/USDC)。
+    """
     if is_no_cache():
         logger.info("[no_cache] 标的直连: market=%s", market)
-        return await _fetch_symbols_from_source(market)
+        items = await _fetch_symbols_from_source(market)
+        if market == "a_share":
+            await _merge_a_share_tags_inplace(items)
+        return items
 
     if not force_refresh:
         age = await repo.get_symbols_age_sec(market)
@@ -75,10 +84,14 @@ async def get_or_fetch_symbols(market: str, force_refresh: bool = False) -> List
             cached = await repo.list_symbols(market)
             if cached:
                 logger.debug("命中缓存: market=%s 标的=%d (age=%ds)", market, len(cached), age)
+                if market == "a_share":
+                    await _merge_a_share_tags_inplace(cached)
                 return cached
 
     # 缓存失效, 重新拉
     items = await _fetch_symbols_from_source(market)
+    if market == "a_share":
+        await _merge_a_share_tags_inplace(items)
     await repo.upsert_symbols(market, items)
     return items
 
@@ -95,6 +108,25 @@ async def _fetch_symbols_from_source(market: str) -> List[dict]:
     except Exception as e:
         logger.warning("Binance 拉取失败, 回退 OKX: %s", e)
         return await crypto_src.list_futures(provider="okx")
+
+
+async def _merge_a_share_tags_inplace(items: List[dict]):
+    """给每只 A 股补齐 tags: 派生 + 外部 (双融/蓝筹/白马)。"""
+    if not items:
+        return
+    try:
+        external = await a_share.fetch_a_share_external_tags()
+    except Exception as e:
+        logger.warning("外部标签拉取失败 (跳过): %s", e)
+        external = {}
+    for it in items:
+        code = it.get("code") or it.get("symbol")
+        name = it.get("name") or ""
+        tags = list(a_share.derive_a_share_tags(code, name))  # 派生
+        ext = external.get(code)
+        if ext:
+            tags.extend(ext)  # 外部: ["双融","蓝筹","白马"]
+        it["tags"] = tags
 
 
 # ============== K 线 ==============
@@ -175,6 +207,91 @@ async def get_or_fetch_klines(
 
     # 3) 合并: 缓存里所有 + 增量, 取最近 limit 根
     return await repo.get_klines(market, symbol, interval, limit=limit, ascending=True)
+
+
+# ============== K 线 批量版 (扫描用, 单 SQL 拿 N 标的) ==============
+async def get_or_fetch_klines_bulk(
+    market: str,
+    symbols: List[str],
+    interval: str,
+    limit: int = 200,
+    provider: Optional[str] = None,
+    concurrency: int = 8,
+) -> dict:
+    """批量拉 N 个标的的 K 线, 大量减少 DB 往返。
+
+    流程:
+      1) 一次 SQL: 拿每个 symbol 最新 open_time
+      2) 区分: 缓存够新鲜 + 够数 -> 走 get_klines_bulk 一次拿;
+                否则 -> 标记为待补拉
+      3) 并发限流 (semaphore) 拉缺失标的的增量, 写回 DB
+      4) 最后再走一次 get_klines_bulk 拿齐
+    返回: { symbol: [[time, open, ...], ...] } (升序, 不够 limit 时为全部)
+    """
+    if not symbols:
+        return {}
+    out: dict = {s: [] for s in symbols}
+
+    # no_cache: 走单标并发 (cache-aside 路径仍用单标, 简单可靠)
+    if is_no_cache():
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _one(sym):
+            async with sem:
+                try:
+                    out[sym] = await _fetch_klines_from_source(
+                        market, sym, interval, limit, provider=provider,
+                    ) or []
+                except Exception:
+                    out[sym] = []
+        await asyncio.gather(*[_one(s) for s in symbols])
+        return out
+
+    # 1) 一次 SQL 拿每个 symbol 最新 open_time
+    last_ts = await repo.get_last_open_times_bulk(market, symbols, interval)
+
+    # 2) 分类
+    fresh: List[str] = []   # 缓存够新鲜
+    need_refetch: List[str] = []  # 缓存缺失或过时
+    for sym in symbols:
+        lt = last_ts.get(sym)
+        if lt is not None and _is_last_bar_fresh(lt, interval):
+            fresh.append(sym)
+        else:
+            need_refetch.append(sym)
+
+    # 3) 缓存新鲜的: 一次 SQL 拿全部 (含 limit 窗口)
+    if fresh:
+        try:
+            cached_bulk = await repo.get_klines_bulk(market, fresh, interval, limit=limit)
+        except Exception as e:
+            logger.warning("get_klines_bulk 失败, 退回单查: %s", e)
+            cached_bulk = {}
+        for sym in fresh:
+            rows = cached_bulk.get(sym) or []
+            if len(rows) >= limit:
+                out[sym] = rows
+            else:
+                # 数量不够 (可能缓存里只存了 <limit 行), 转去补拉
+                need_refetch.append(sym)
+                out[sym] = rows  # 先放上, 等下补完后会被覆盖
+
+    # 4) 补拉缺失 / 过时 / 数量不够的标的 (走缓存 + 增量逻辑, 但单标并发限流)
+    if need_refetch:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _one(sym):
+            async with sem:
+                try:
+                    out[sym] = await get_or_fetch_klines(
+                        market, sym, interval, limit=limit, provider=provider,
+                    )
+                except Exception as e:
+                    logger.debug("bulk 拉 %s %s 失败: %s", sym, interval, e)
+                    # 保留已有 partial
+        await asyncio.gather(*[_one(s) for s in need_refetch])
+
+    return out
 
 
 async def _fetch_klines_from_source(

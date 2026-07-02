@@ -6,23 +6,15 @@
       "rules": [
         {
           "interval": "1d",
-          "indicator": "ma",
-          "pattern": "ma5_above_ma20",
+          "indicator": "boll",
+          "pattern": "mid_trend_up",
           "value": null,
-          "lookback": 30,
-          "match_count": 4
-        },
-        {
-          "interval": "1d",
-          "indicator": "vol",
-          "pattern": "vol_above",
-          "value": 1.4,
-          "lookback": 30,
+          "lookback": 60,
           "match_count": 1
         }
       ],
       "created_at": 1782835442.2318356,
-      "updated_at": 1782842407.9226508,
+      "updated_at": 1782922004.1541917,
       "market": "a_share"
     },
     {

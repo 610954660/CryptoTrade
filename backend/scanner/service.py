@@ -33,8 +33,7 @@ from data_sources import a_share, crypto
 from cache import service as cache_service
 from indicators import (
     IndicatorSet,
-    compute_all,
-    compute_boll,
+    compute_indicators_needed,
 )
 from scanner.matcher import (
     match_pattern,
@@ -67,6 +66,8 @@ class ScanRequest:
     limit: int = 200                 # 默认拉 200 根, 满足 lookback
     concurrency: int = 8
     progress_cb: Optional[callable] = None
+    tag_filters: Optional[dict] = None  # {group_key: [option_key, ...]}; None = 不限
+    kline_filter_enabled: bool = True   # K 线筛选总开关: False=跳过 pipeline, 标的预筛池全部当命中
 
 
 # --------- 扫描结果 ---------
@@ -160,65 +161,61 @@ def _label_for(rule: IntervalRule, res) -> str:
     return p
 
 
-# --------- 单标的扫描 ---------
+# --------- 单标的扫描 (pipeline 形式) ---------
+# pipeline 思路: 每条规则 = 一个 filter function, 顺序执行
+#   data_pool -> [filter_0] -> [filter_1] -> ... -> hits
+# 单条规则未启用 (enabled=False): 作为 passthrough, 不影响后续规则
+# 所有规则都未启用: pipeline 为空, 所有标的都"通过" (相当于全量输出, 实际 UI 应至少 1 条启用)
+
 async def _scan_symbol(
     market: str,
     symbol_info: dict,
     rules: List[IntervalRule],
     default_limit: int,
-    semaphore: asyncio.Semaphore,
+    intervals_klines: Dict[str, List[list]],
+    indicators_needed: set,
 ) -> Optional[SymbolHit]:
-    """对单个标的执行所有规则。"""
+    """对单个标的执行 pipeline。
+
+    intervals_klines: 由调用方预批量拉好的 { interval: rows }。
+    indicators_needed: 本批规则实际用到的指标集合 (例 {"boll"})。
+    """
     sym = symbol_info["symbol"]
     name = symbol_info.get("name") or symbol_info.get("display", sym)
 
-    # 按 interval 去重, 每个 interval 只拉一次 (一次性算所有指标)
-    intervals_needed: Dict[str, int] = {}  # interval -> max(lookback)
-    for rule in rules:
-        if not rule.interval or not rule.pattern:
-            continue
-        # 拉取根数: max(lookback, default_limit)
-        n = max(rule.lookback or 200, default_limit or 200)
-        if intervals_needed.get(rule.interval, 0) < n:
-            intervals_needed[rule.interval] = n
-
-    rule_results: Dict[str, dict] = {}  # key = "{index}|{interval}|{indicator}|{pattern}"
+    # 按 interval -> IndicatorSet (同一 interval 复用, 不同 indicator 按需计算)
+    ind_cache: Dict[str, IndicatorSet] = {}
     last_close = 0.0
 
-    async with semaphore:
-        for iv, need in intervals_needed.items():
-            try:
-                klines = await _fetch_kline(market, sym, iv, need)
-            except Exception as e:
-                logger.debug("拉取 %s %s K 线失败: %s", sym, iv, e)
-                continue
-            if not klines or len(klines) < 25:
-                continue
-            # 一次性算所有指标 (减少重复算)
-            ind = compute_all(klines)
-            if ind.bars:
-                last_close = ind.bars[-1].close
-            # 应用这个 interval 的所有规则
-            # key 包含 index, 避免同 interval+indicator+pattern 覆盖 (如两条相同 ma20 规则)
-            for ri, rule in enumerate(rules):
-                if rule.interval != iv:
-                    continue
-                if not rule.pattern:
-                    continue
-                rd = _match_rule(rule, ind)
-                key = f"{ri}|{iv}|{rule.indicator}|{rule.pattern}"
-                rule_results[key] = rd
+    for iv, klines in intervals_klines.items():
+        if not klines or len(klines) < 25:
+            continue
+        ind = compute_indicators_needed(klines, indicators_needed)
+        ind_cache[iv] = ind
+        if ind.bars:
+            last_close = ind.bars[-1].close
 
-    if not rule_results:
+    # 2) 构建 pipeline: 每条规则 = 一个 filter function
+    rule_results: Dict[str, dict] = {}
+    pipeline_matched = True
+    for ri, rule in enumerate(rules):
+        if not rule.interval or not rule.pattern:
+            continue
+        if not pipeline_matched:
+            break
+        ind = ind_cache.get(rule.interval)
+        if ind is None:
+            pipeline_matched = False
+            break
+        rd = _match_rule(rule, ind)
+        key = f"{ri}|{rule.interval}|{rule.indicator}|{rule.pattern}"
+        rule_results[key] = rd
+        pipeline_matched = rd["matched"]
+
+    if not pipeline_matched:
         return None
 
-    # 联合判断: 多规则 AND, 单规则直接看它
-    if len(rule_results) == 1:
-        combined = list(rule_results.values())[0]["matched"]
-    else:
-        combined = all(r["matched"] for r in rule_results.values())
-
-    if not combined:
+    if not rule_results:
         return None
 
     return SymbolHit(
@@ -233,6 +230,61 @@ async def _scan_symbol(
 
 
 # --------- 主扫描流程 ---------
+def _symbol_matches_group(s: dict, group_key: str, option_keys: list, market: str) -> bool:
+    """判断一个标的是否命中某个 group (任一 option_key 命中即 True)。
+
+    group_key -> 内部 tag 集合的映射:
+      a_share:
+        exchange: 派生 ['sh','sz','bj'] -> code 前缀
+        board:    派生 ['main','star','chinext','bse']
+        warning:  派生 ['st']
+        quality:  外部 (从 s['tags'] 里读 '双融'/'蓝筹'/'白马') -> option_key 'margin'/'blue'/'white'
+      crypto / crypto_okx:
+        bluechip: 派生 (s['tags'] 含 'bluechip_yes'/'bluechip_no')
+        quote:    派生 (s['tags'] 含 'quote_USDT'/'quote_USDC')
+    """
+    code = s.get("code") or s.get("symbol", "")
+    name = s.get("name") or ""
+    item_tags = set(s.get("tags") or [])
+
+    if market == "a_share":
+        derived = set(a_share.derive_a_share_tags(code, name))
+        # 外部标签: option_key -> 内部 tag
+        QUALITY_MAP = {"margin": "双融", "blue": "蓝筹", "white": "白马"}
+        if group_key in ("exchange", "board", "warning"):
+            return any(opt in derived for opt in option_keys)
+        if group_key == "quality":
+            internal = {QUALITY_MAP.get(o) for o in option_keys}
+            internal.discard(None)
+            return any(t in item_tags for t in internal)
+        return True  # 未知 group: 视为不限
+    else:
+        # crypto: 直接读 tags
+        if group_key == "bluechip":
+            return any(opt in item_tags for opt in option_keys)
+        if group_key == "quote":
+            return any(opt in item_tags for opt in option_keys)
+        return True
+
+
+def _apply_tag_filters(symbols: list, tag_filters: dict, market: str) -> list:
+    """应用复选筛选: 跨 group AND, 同 group OR。 空 group 不限。"""
+    if not tag_filters:
+        return symbols
+    out = []
+    for s in symbols:
+        ok = True
+        for gk, opts in tag_filters.items():
+            if not opts:  # 空 group 视为不限
+                continue
+            if not _symbol_matches_group(s, gk, [str(o) for o in opts], market):
+                ok = False
+                break
+        if ok:
+            out.append(s)
+    return out
+
+
 async def scan(req: ScanRequest) -> dict:
     """执行扫描。 支持同步 progress_cb。"""
     market = _normalize_market(req.market)
@@ -244,47 +296,156 @@ async def scan(req: ScanRequest) -> dict:
     else:
         targets = all_symbols
 
+    # 标签预筛: 同 group 内 OR, 跨 group AND。 空 group 视为"不限"。
+    if req.tag_filters:
+        before = len(targets)
+        targets = _apply_tag_filters(targets, req.tag_filters, market)
+        logger.info("标签预筛: %d -> %d (filters=%s)", before, len(targets), req.tag_filters)
+        if not targets:
+            return {
+                "market": market,
+                "total_symbols": 0,
+                "scanned": 0,
+                "hits": [],
+                "hit_count": 0,
+                "elapsed_sec": 0.0,
+                "errors": 0,
+            }
+
+    # K 线筛选总开关关闭: 跳过 pipeline, 直接把标的预筛池全部当命中
+    # 但仍拉一次最近价 (用 default_limit 根 1d K 线), 让表格里"最近价"列有意义
+    if not req.kline_filter_enabled:
+        logger.info("K线筛选已关闭, 跳过 pipeline, 输出 %d 个标的预筛池全部命中", len(targets))
+        started = time.time()
+        # 并发拉最近价 (限流到 req.concurrency, 与正常扫描一致)
+        sem = asyncio.Semaphore(req.concurrency)
+        PRICE_LIMIT = max(50, min(req.limit or 100, 200))  # 拉 1d 50-200 根足够取最后一个 close
+
+        async def _fetch_price(s):
+            sym = s["symbol"]
+            async with sem:
+                try:
+                    klines = await _fetch_kline(market, sym, "1d", PRICE_LIMIT)
+                except Exception:
+                    return s["symbol"], 0.0
+                if not klines:
+                    return s["symbol"], 0.0
+                # kline 格式 [ts, open, high, low, close, vol]
+                try:
+                    return s["symbol"], float(klines[-1][4])
+                except Exception:
+                    return s["symbol"], 0.0
+
+        # 推 progress_cb: 每完成一个更新一次
+        done_counter = 0
+
+        async def _wrap(s):
+            nonlocal done_counter
+            sym, last_close = await _fetch_price(s)
+            done_counter += 1
+            if req.progress_cb:
+                try:
+                    req.progress_cb(done_counter, len(targets), None)
+                except Exception:
+                    pass
+            return sym, last_close
+
+        # 分批并发, 每批 200
+        BATCH = 200
+        prices: Dict[str, float] = {}
+        for i in range(0, len(targets), BATCH):
+            batch = targets[i : i + BATCH]
+            results = await asyncio.gather(*[_wrap(s) for s in batch], return_exceptions=True)
+            for r in results:
+                if isinstance(r, tuple) and len(r) == 2:
+                    sym, price = r
+                    prices[sym] = price
+
+        hits = [
+            SymbolHit(
+                symbol=s["symbol"],
+                name=s.get("name") or s.get("display") or s["symbol"],
+                display=s.get("display") or s["symbol"],
+                rules={},  # 没有跑规则, 命中详情为空
+                combined_matched=True,
+                last_close=prices.get(s["symbol"], 0.0),
+                last_mid=prices.get(s["symbol"], 0.0),
+            )
+            for s in targets
+        ]
+        return {
+            "market": market,
+            "total_symbols": len(targets),
+            "scanned": len(targets),
+            "hits": [_hit_to_dict(h) for h in hits],
+            "hit_count": len(hits),
+            "elapsed_sec": round(time.time() - started, 2),
+            "errors": 0,
+        }
+
     if not req.rules:
         raise ValueError("至少需要一条规则")
+
+    # 收集本批规则实际用到的指标集合 (懒计算用)
+    indicators_needed = {r.indicator for r in req.rules if r.indicator}
+
+    # 按 interval 取最大 lookback -> limit
+    intervals_needed: Dict[str, int] = {}
+    for rule in req.rules:
+        if not rule.interval or not rule.pattern:
+            continue
+        n = max(rule.lookback or 200, req.limit or 200)
+        if intervals_needed.get(rule.interval, 0) < n:
+            intervals_needed[rule.interval] = n
 
     sem = asyncio.Semaphore(req.concurrency)
     started = time.time()
     hits: List[SymbolHit] = []
     errors = 0
     done_counter = 0
-    lock = asyncio.Lock()
-
-    async def _wrap(s):
-        nonlocal errors
-        result = None
-        try:
-            result = await _scan_symbol(market, s, req.rules, req.limit, sem)
-        except Exception as e:
-            # 完整堆栈, 方便定位 AttributeError 之类的根因
-            logger.exception("扫描 %s 出错", s.get("symbol"))
-            errors += 1
-        if req.progress_cb:
-            try:
-                req.progress_cb(done_counter + 1, len(targets), result)
-            except Exception:
-                pass
-        return result
 
     BATCH = 200
     for i in range(0, len(targets), BATCH):
         batch = targets[i : i + BATCH]
+        symbols = [s["symbol"] for s in batch]
+
+        # 每 batch: 并发 (interval, symbol 矩阵) 批量拉 K 线 (单 SQL 一次 N 标的)
+        async def _bulk_for_iv(iv: str, n: int):
+            return iv, await cache_service.get_or_fetch_klines_bulk(
+                market, symbols, iv, limit=n,
+                provider=_data_source_provider(market),
+                concurrency=req.concurrency,
+            )
+        bulk_results = await asyncio.gather(*[_bulk_for_iv(iv, n) for iv, n in intervals_needed.items()])
+        # iv_klines_all[interval][symbol] = rows
+        iv_klines_all: Dict[str, Dict[str, List[list]]] = {iv: m for iv, m in bulk_results}
 
         async def _run_one(s):
-            nonlocal done_counter
-            r = await _wrap(s)
-            done_counter += 1
-            return r
+            sym = s["symbol"]
+            per_iv = {iv: iv_klines_all[iv].get(sym) or [] for iv in intervals_needed}
+            return await _scan_symbol(market, s, req.rules, req.limit, per_iv, indicators_needed)
 
-        results = await asyncio.gather(*[_run_one(s) for s in batch])
-        for r in results:
+        results = await asyncio.gather(*[_run_one(s) for s in batch], return_exceptions=True)
+        for s, r in zip(batch, results):
+            done_counter += 1
+            if isinstance(r, Exception):
+                logger.exception("扫描 %s 出错", s.get("symbol"))
+                errors += 1
+                if req.progress_cb:
+                    try: req.progress_cb(done_counter, len(targets), None)
+                    except Exception: pass
+                continue
             if r is None:
+                if req.progress_cb:
+                    try: req.progress_cb(done_counter, len(targets), None)
+                    except Exception: pass
                 continue
             hits.append(r)
+            if req.progress_cb:
+                try:
+                    req.progress_cb(done_counter, len(targets), r)
+                except Exception:
+                    pass
 
     elapsed = time.time() - started
     logger.info("扫描完成: market=%s 标的=%d 命中=%d 错误=%d 用时=%.1fs",

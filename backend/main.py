@@ -22,7 +22,7 @@ import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # --------- 启动期错误捕获 (终端闪退时能留底) ---------
 # 任何 import / 初始化阶段的异常都写到 data/logs/{date}/startup-error.log
@@ -328,6 +328,14 @@ class ScanSchema(BaseModel):
     symbols: Optional[List[str]] = None
     limit: int = Field(200, ge=20, le=1000)
     concurrency: int = Field(8, ge=1, le=32)
+    tag_filters: Optional[Dict[str, List[str]]] = Field(
+        None,
+        description="标的预筛标签: {'exchange':['sh'],'board':['star'],'quality':['margin']}, 同 key 内 OR, 跨 key AND",
+    )
+    kline_filter_enabled: bool = Field(
+        True,
+        description="K 线筛选总开关: True=按 pipeline 过滤; False=跳过 pipeline, 把标的预筛池全部当命中",
+    )
 
 
 def _to_interval_rule(r: RuleSchema) -> IntervalRule:
@@ -341,9 +349,82 @@ def _to_interval_rule(r: RuleSchema) -> IntervalRule:
     )
 
 
+# --------- 扫描筛选维度定义 (按市场) ---------
+# 标签 key 是 group key; 同一 group 内多选 = OR; 跨 group 多选 = AND。
+# 后端 _apply_tag_filters 严格按此定义匹配。
+_FILTER_OPTIONS = {
+    "a_share": {
+        "groups": [
+            {"key": "exchange", "label": "交易所", "multi": True, "options": [
+                {"key": "sh", "label": "上交所"},
+                {"key": "sz", "label": "深交所"},
+                {"key": "bj", "label": "北交所"},
+            ]},
+            {"key": "board", "label": "板块", "multi": True, "options": [
+                {"key": "main",    "label": "主板"},
+                {"key": "star",    "label": "科创板"},
+                {"key": "chinext", "label": "创业板"},
+                {"key": "bse",     "label": "北证"},
+            ]},
+            {"key": "warning", "label": "风险警示", "multi": True, "options": [
+                {"key": "st", "label": "ST/*ST"},
+            ]},
+            {"key": "quality", "label": "资金/质量", "multi": True, "options": [
+                {"key": "margin", "label": "双融"},
+                {"key": "blue",   "label": "蓝筹"},
+                {"key": "white",  "label": "白马"},
+            ]},
+        ],
+        "hint": "组内任选其一即纳入初筛, 跨组之间为\"且\"关系。",
+    },
+    "crypto": {
+        "groups": [
+            {"key": "bluechip", "label": "主流币", "multi": True, "options": [
+                {"key": "bluechip_yes", "label": "主流币"},
+                {"key": "bluechip_no",  "label": "非主流"},
+            ]},
+            {"key": "quote", "label": "计价币种", "multi": True, "options": [
+                {"key": "quote_USDT", "label": "USDT"},
+                {"key": "quote_USDC", "label": "USDC"},
+            ]},
+        ],
+        "hint": "组内任选其一即纳入初筛, 跨组之间为\"且\"关系。",
+    },
+    "crypto_okx": {
+        "groups": [
+            {"key": "bluechip", "label": "主流币", "multi": True, "options": [
+                {"key": "bluechip_yes", "label": "主流币"},
+                {"key": "bluechip_no",  "label": "非主流"},
+            ]},
+        ],
+        "hint": "OKX 仅 USDT 永续, 无需选计价币种。",
+    },
+}
+
+
+@app.get("/api/scan/filter-options")
+async def api_scan_filter_options(market: str = Query("a_share")):
+    """返回该市场可用的复选筛选维度定义。
+
+    前端拿到后渲染复选框, 收集 {group_key: [option_key, ...]} 提交到 /api/scan。
+    """
+    m = market.lower().strip()
+    if m in ("okx", "crypto_okx"):
+        m = "crypto_okx"
+    elif m in ("binance", "crypto"):
+        m = "crypto"
+    elif m in ("a", "a-share", "a_share", "ashare"):
+        m = "a_share"
+    cfg = _FILTER_OPTIONS.get(m)
+    if not cfg:
+        raise HTTPException(400, f"未知市场: {market}")
+    return {"market": m, **cfg}
+
+
 @app.post("/api/scan")
 async def api_scan(body: ScanSchema):
-    if not body.rules:
+    # K 线筛选关闭时, 允许空规则 (后端会把标的预筛池全部输出)
+    if body.kline_filter_enabled and not body.rules:
         raise HTTPException(400, "至少需要一条规则")
     req = ScanRequest(
         market=body.market,
@@ -352,6 +433,8 @@ async def api_scan(body: ScanSchema):
         symbols=body.symbols,
         limit=body.limit,
         concurrency=body.concurrency,
+        tag_filters=body.tag_filters,
+        kline_filter_enabled=body.kline_filter_enabled,
     )
     try:
         result = await scan(req)
@@ -378,7 +461,7 @@ async def api_scan_stream(body: ScanSchema):
 
     from fastapi.responses import StreamingResponse
 
-    if not body.rules:
+    if body.kline_filter_enabled and not body.rules:
         raise HTTPException(400, "至少需要一条规则")
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -406,7 +489,9 @@ async def api_scan_stream(body: ScanSchema):
         symbols=body.symbols,
         limit=body.limit,
         concurrency=body.concurrency,
+        tag_filters=body.tag_filters,
         progress_cb=on_progress,
+        kline_filter_enabled=body.kline_filter_enabled,
     )
 
     async def _runner():
@@ -417,6 +502,8 @@ async def api_scan_stream(body: ScanSchema):
                 "elapsed_sec": result["elapsed_sec"],
                 "errors": result["errors"],
                 "total": result["total_symbols"],
+                # K线筛选关闭时, progress_cb 没传 hit, 必须把全部 hit 在 done 事件里补齐
+                "hits": result["hits"],
             }))
         except Exception as e:
             logger.exception("扫描失败")
